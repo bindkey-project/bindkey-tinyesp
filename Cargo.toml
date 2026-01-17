@@ -36,12 +36,12 @@ embuild = "0.33"
 remote_component = { name = "espressif/tinyusb", version = "0.17.0~2" }
 
 [[package.metadata.esp-idf-sys.extra_components]]
-component_dirs = ["src/usb-emulation/esp-usb/device/esp_tinyusb"]
-bindings_header = "src/usb-emulation/esp-usb/device/esp_tinyusb/bindings.h"
+component_dirs = ["src/usb_emulation/esp-usb/device/esp_tinyusb"]
+bindings_header = "src/usb_emulation/esp-usb/device/esp_tinyusb/bindings.h"
 bindings_module = "esp_tinyusb"
 bindings_include_dirs = [
-    "src/usb-emulation/esp-usb/device/esp_tinyusb/include",
-    "src/usb-emulation/esp-usb/device/esp_tinyusb/include_private",   
+    "src/usb_emulation/esp-usb/device/esp_tinyusb/include",
+    "src/usb_emulation/esp-usb/device/esp_tinyusb/include_private",   
 ]
 
 [package.metadata.esp-idf-sys]
