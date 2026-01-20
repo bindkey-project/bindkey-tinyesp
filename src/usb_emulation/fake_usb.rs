@@ -9,12 +9,16 @@ use esp_idf_sys::esp_tinyusb::{
     tusb_desc_device_t, tusb_desc_device_qualifier_t,
 };
 use esp_idf_sys::*;
+use core::sync::atomic::{AtomicU32, Ordering};
 
 use crate::spi_link::api_spi::get_global_spi;
 
 //fake disk parameters, 4096 blocs = 2MiB => ok for the os to see a disk and mount/format it
 const BLOCK_SIZE: u16 = 512;
 const BLOCK_COUNT: u32 = 4096;
+
+static ACTIVE_BS: AtomicU32 = AtomicU32::new(BLOCK_SIZE as u32);
+static ACTIVE_BC: AtomicU32 = AtomicU32::new(BLOCK_COUNT);
 
 extern "C" {
     fn tud_msc_set_sense(lun: u8, sense_key: u8, asc: u8, ascq: u8);
@@ -144,7 +148,7 @@ pub extern "C" fn tud_msc_test_unit_ready_cb(_lun: u8) -> bool{
     }
 }
 
-//capacity: shows a little fake disk
+//capacity
 #[no_mangle]
 pub extern "C" fn tud_msc_capacity_cb(_lun: u8, block_count: *mut u32, block_size: *mut u16){
     //fallback fake
@@ -206,6 +210,7 @@ pub extern "C" fn tud_msc_read10_cb(lun: u8, _lba: u32, offset: u32, buffer: *mu
     };
 
     let nblocks = (bufsize as u32) / (BLOCK_SIZE as u32);
+    log::info!("MSC_CB: READ10 lun={} lba={} nblocks={} bufsize={} offset={}", lun, _lba, nblocks, bufsize, offset);
 
     let out = unsafe{
         core::slice::from_raw_parts_mut(buffer as *mut u8, bufsize as usize)
@@ -249,6 +254,8 @@ pub extern "C" fn tud_msc_write10_cb(lun: u8, _lba: u32, offset: u32, _buffer: *
     };
 
     let nblocks = (bufsize as u32) / (BLOCK_SIZE as u32);
+    log::info!("MSC_CB: WRITE10 lun={} lba={} nblocks={} bufsize={} offset={}", lun, _lba, nblocks, bufsize, offset);
+
     let data = unsafe{
         core::slice::from_raw_parts(_buffer as *const u8, bufsize as usize)
     };

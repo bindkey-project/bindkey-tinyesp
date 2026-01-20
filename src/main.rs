@@ -18,7 +18,18 @@ fn main() {
 
     log::info!("Starting fake USB MSC + SPI...");
 
-    let mut spi = SpiMaster::new();
+    let mut spi = match SpiMaster::new() {
+    Ok(s) => s,
+    Err(err) => {
+        log::error!(
+            "SpiMaster::new failed {} ({})",
+            err,
+            unsafe { core::ffi::CStr::from_ptr(esp_err_to_name(err)).to_string_lossy() }
+        );
+        return;
+    }
+};
+
     if let Err(err) = spi.init(){
         log::error!("SpiMaster::init failed {} ({})",
             err,
