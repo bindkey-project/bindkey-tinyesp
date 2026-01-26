@@ -20,5 +20,25 @@ CONFIG_LOG_DEFAULT_LEVEL_INFO=y
 #CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="/home/ouiyam/TP/ESP32/device-tiny/partitions.csv"
 #CONFIG_PARTITION_TABLE_FILENAME="partitions.csv"
 
-# Flash size (tu as 16MB)
+# Flash size 
 #CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+
+# Force l’utilisation du driver I2C legacy pour éviter
+# le conflit legacy / driver_ng sous ESP-IDF >= 5.2
+CONFIG_ATCA_I2C_USE_LEGACY_DRIVER=y
+
+# Type de puce : ATECC608A Trust & GO (par défaut du composant)
+CONFIG_ATECC608A_TCUSTOM=y
+CONFIG_ATECC608A_TNG=n
+CONFIG_ATECC608A_TFLEX=n
+
+# Pins I2C utilisées pour l’ATECC608A
+CONFIG_ATCA_I2C_SDA_PIN=6
+CONFIG_ATCA_I2C_SCL_PIN=7
+
+# Adresse I2C (8-bit) pour ATECC608A Trust & GO
+# (valeur attendue par CryptoAuthLib)
+CONFIG_ATCA_I2C_ADDRESS=0xC0
+
+# Fréquence I2C (100 kHz recommandé pour ATECC)
+CONFIG_ATCA_I2C_BAUD_RATE=100000

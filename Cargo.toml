@@ -44,9 +44,21 @@ bindings_include_dirs = [
     "src/usb_emulation/esp-usb/device/esp_tinyusb/include_private",   
 ]
 
+
 [package.metadata.esp-idf-sys]
+esp_idf_sdkconfig_defaults = ["sdkconfig.defaults"]
 
 [[package.metadata.esp-idf-sys.extra_components]]
 component_dirs = "src/fingerprint/BMLite"
 bindings_header = "src/fingerprint/BMLite/bindings.h"
 bindings_module = "bmlite"
+
+[[package.metadata.esp-idf-sys.extra_components]]
+component_dirs = "src/crypto/esp-cryptoauthlib"
+bindings_header = "src/crypto/esp-cryptoauthlib/bindings.h"
+bindings_module = "esp_cryptoauthlib"
+bindings_include_dirs = [
+    "src/crypto/esp-cryptoauthlib",
+    "src/crypto/esp-cryptoauthlib/cryptoauthlib/lib",
+    "src/crypto/esp-cryptoauthlib/port/include"
+]

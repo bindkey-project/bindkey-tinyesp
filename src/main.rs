@@ -4,10 +4,12 @@ use esp_idf_sys::*;
 
 mod usb_emulation;
 mod spi_link;
+mod crypto;
 
 use crate::usb_emulation::fake_usb::*;
 use crate::spi_link::spi_master::SpiMaster;
 use crate::spi_link::api_spi::set_global_spi;
+use crate::crypto::secure_element::*;
 
 fn main() {
     // Obligatoire pour esp-idf-sys
@@ -54,6 +56,24 @@ fn main() {
         }
     }
 
+    log::info!("Testing ATECC608...");
+
+    /*unsafe {
+        i2c_init_legacy(i2c_port_t_I2C_NUM_0, 6, 7, 100_000);
+        i2c_scan_legacy(i2c_port_t_I2C_NUM_0);
+    }*/
+
+    match atecc_smoke() {
+        Ok(rev) => log::info!("ATECC revision: {:02X?}", rev),
+        Err(rc) => log::error!("ATECC failed rc={}", rc),
+    }
+
+    match se_dump_and_master_dev(){
+        Ok(()) => log::info!("ATECC test ok"),
+        Err(rc) => log::info!("ATECC failed rc={}", rc),
+    }
+
+    
     log::info!("Fake MSC ready. Plug USB to host.");
 
     // IMPORTANT: ne jamais sortir de main
