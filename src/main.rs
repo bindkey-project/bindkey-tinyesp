@@ -71,8 +71,64 @@ fn main() {
 
     match se_dump_and_master_dev(){
         Ok(()) => log::info!("ATECC test ok"),
-        Err(rc) => log::info!("ATECC failed rc={}", rc),
+        Err(rc) => log::info!("ATECC failed rc={}", rc)
     }
+
+    match provisionning_lock_config(){
+        Ok(()) =>{
+            log::info!("✅ Lock config OK");
+
+            match dump_config_zone(){
+                Ok(cfg) =>{
+                    log::info!("config zone dump (128B):");
+                    for (i, chunk) in cfg.chunks(16).enumerate(){
+                        log::info!("{:02}: {:02X?}", i, chunk);
+                    }
+                    dump_slot_keycfg(&cfg);
+                }
+                Err(rc) => log::error!("dump_config_zone failed rc={}", rc),
+            }
+        }
+        Err(rc) =>{
+            log::error!("❌ Lock config failed rc={}", rc);
+        }
+    }
+
+    match test_ecc_identity(0) {
+        Ok(()) => log::info!("ECC identity test OK (slot 0)"),
+        Err(rc) =>{
+            log::warn!("ECC test failed on slot 0 rc={}, trying slot 1...", rc);
+            match test_ecc_identity(1) {
+                Ok(()) => log::info!("ECC identity test OK (slot 1)"),
+                Err(rc2) => log::error!("ECC identity test failed rc={} (slot0) rc={} (slot1)", rc, rc2),
+            }
+        }
+    }
+
+    match test_get_pub_key(0){
+        Ok(()) => log::info!("Pubkey is well obtained"),
+        Err(rc) => log::error!("Pubkey obtention is failed rc={}", rc)
+    }
+
+    match test_identity_sign(){
+        Ok(()) => log::info!("Signature OK"),
+        Err(rc) => log::error!("Signature error rc={}", rc)
+    }
+
+    match scan_slots_readonly(){
+        Ok(()) => log::info!("scan read-only done"),
+        Err(rc) => log::error!("scan read-only failed rc={}", rc),
+    }
+
+    match scan_slots_write_read_data_like(){
+        Ok(()) => log::info!("scan write/read done"),
+        Err(rc) => log::error!("scan write/read failed rc={}", rc),
+    }
+
+
+
+
+
 
     match test_fingerprint(){
         Ok(()) => log::info!("Fingerprint ok"),
