@@ -46,8 +46,6 @@ fn main() {
     }
 
     set_global_spi(&mut spi);
-
-    static mut DISK: Option<EncryptedDisk> = None;
     
     let key = match(|| -> Result<[u8; 32], i32>{
         let se = AteccSession::new()?;
@@ -69,25 +67,21 @@ fn main() {
         }
     };
 
-    unsafe{
-        match EncryptedDisk::new(&key){
-            Ok(d) => {
-                DISK = Some(d);
-                set_global_disk(DISK.as_mut().unwrap());
-                log::info!("EncryptedDisk initialized");
-            }
-            Err(err) => {
-                log::error!(
-                    "EncryptedDisk::new failed {} ({})",
-                    err,
-                    unsafe{ 
-                        core::ffi::CStr::from_ptr(esp_err_to_name(err)).to_string_lossy() 
-                    }
-                );
-                return;
-            }
+    let mut disk_box: Box<EncryptedDisk> = match EncryptedDisk::new(&key){
+        Ok(d) => Box::new(d),
+        Err(err) => {
+            log::error!(
+                "EncryptedDisk::new failed {} ({})",
+                err,
+                unsafe{core::ffi::CStr::from_ptr(esp_err_to_name(err)).to_string_lossy()}
+            );
+            return;
         }
-    }
+    };
+
+    let disk_ref: &'static mut EncryptedDisk = Box::leak(disk_box);
+    set_global_disk(disk_ref);
+    log::info!("EncryptedDisk initialized (heap)");
 
     unsafe{
         let err = init_fake_usb_msc();

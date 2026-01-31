@@ -38,7 +38,7 @@ pub struct EncryptedDisk{
     cached_meta_dirty: bool,
     meta_buf: [u8; SECTOR_SIZE],
 
-    cipher_buf: [u8; SECTOR_SIZE]
+    cipher_buf: [u8; BATCH_BYTES]
 }
 
 impl EncryptedDisk{
@@ -49,7 +49,7 @@ impl EncryptedDisk{
             cached_meta: MetaSector::default(),
             cached_meta_dirty: false,
             meta_buf: [0u8; SECTOR_SIZE],
-            cipher_buf: [0u8; SECTOR_SIZE]
+            cipher_buf: [0u8; BATCH_BYTES]
         })
     }
 
@@ -61,7 +61,7 @@ impl EncryptedDisk{
     }
 
     pub fn flush_all(&mut self, spi: &mut SpiMaster) -> Result<(), i32>{
-        self.flush_all(spi)?;
+        self.flush_meta(spi)?;
         spi.flush()
     }
 
@@ -71,23 +71,43 @@ impl EncryptedDisk{
             return Err(ESP_ERR_INVALID_SIZE);
         }
 
-        for i in 0..(nblocks as usize){
-            let lba = lba_start.wrapping_add(i as u32);
+        let mut done: usize = 0;
+        while done < nblocks as usize{
+            let lba = lba_start.wrapping_add(done as u32);
             let (data_phys, meta_phys, idx) = map_lba(lba);
 
             self.load_meta(spi, meta_phys)?;
-            let entry = self.cached_meta.entries[idx];
 
-            let out_sector = &mut out[i * SECTOR_SIZE..(i+1) * SECTOR_SIZE];
+            let remaining = (nblocks as usize) - done;
+            let max_in_group = (G as usize) - idx;
+            let run = remaining.min(max_in_group).min(MAX_BATCH_BLOCKS);    
 
-            if entry.is_empty(){
-                out_sector.fill(0);
+            let out_chunk = &mut out[done * SECTOR_SIZE..(done + run) * SECTOR_SIZE];
+
+            let all_empty = self.cached_meta.entries[idx..idx + run].iter().all(|e| e.is_empty());
+            if all_empty{
+                out_chunk.fill(0);
+                done += run;
                 continue;
             }
 
-            spi.read(data_phys, 1, SECTOR_SIZE as u32, &mut self.cipher_buf)?;
+            let ct_len = run * SECTOR_SIZE;
+            spi.read(data_phys, run as u32, SECTOR_SIZE as u32, &mut self.cipher_buf[..ct_len])?;
 
-            decrypt_sector(&mut self.gcm, lba, entry.counter, &self.cipher_buf, &entry.tag, out_sector)?;
+            for j in 0..run{
+                let entry = self.cached_meta.entries[idx + j];
+                let out_sector = &mut out_chunk[j * SECTOR_SIZE..(j+1) * SECTOR_SIZE];
+
+                if entry.is_empty(){
+                    out_sector.fill(0);
+                    continue;
+                }
+
+                let ct_sector = &self.cipher_buf[j * SECTOR_SIZE..(j+1) * SECTOR_SIZE];
+
+                decrypt_sector(&mut self.gcm, lba.wrapping_add(j as u32), entry.counter, ct_sector, &entry.tag, out_sector)?;
+            }
+            done += run;
         }
 
         Ok(())
@@ -99,32 +119,47 @@ impl EncryptedDisk{
             return Err(ESP_ERR_INVALID_SIZE);
         }
 
+        let mut done: usize = 0;
         let mut tag = [0u8; TAG_LEN];
 
-        for i in 0..(nblocks as usize){
-            let lba = lba_start.wrapping_add(i as u32);
+        while done < nblocks as usize{
+            let lba = lba_start.wrapping_add(done as u32);
             let (data_phys, meta_phys, idx) = map_lba(lba);
 
             self.load_meta(spi, meta_phys)?;
-            let old = self.cached_meta.entries[idx];
 
-            let mut counter = old.counter.wrapping_add(1);
-            if counter == 0{
-                return Err(ESP_ERR_INVALID_STATE); //overflow u32
+            let remaining = (nblocks as usize) - done;
+            let max_in_group = (G as usize) - idx;
+            let run = remaining.min(max_in_group).min(MAX_BATCH_BLOCKS);
+
+            let in_chunk = &data[done * SECTOR_SIZE..(done + run) * SECTOR_SIZE];
+
+            for j in 0..run{
+                let lba_j = lba.wrapping_add(j as u32);
+                let old = self.cached_meta.entries[idx + j];
+
+                let mut counter = old.counter.wrapping_add(1);
+                if old.counter == 0{
+                    counter = 1;
+                }
+                if counter == 0{
+                    return Err(ESP_ERR_INVALID_STATE); //overflow u32
+                }
+
+                let pt_sector = &in_chunk[j * SECTOR_SIZE..(j+1) * SECTOR_SIZE];
+                let ct_sector = &mut self.cipher_buf[j * SECTOR_SIZE..(j+1) * SECTOR_SIZE];
+
+                encrypt_sector(&mut self.gcm, lba_j, counter, pt_sector, ct_sector, &mut tag)?;
+
+                self.cached_meta.entries[idx + j].counter = counter;
+                self.cached_meta.entries[idx + j].tag = tag;
+                self.cached_meta_dirty = true;
             }
-            if old.counter == 0{
-                counter = 1;
-            }
 
-            let in_sector = &data[i * SECTOR_SIZE..(i+1) * SECTOR_SIZE];
+            let ct_len = run * SECTOR_SIZE;
+            spi.write(data_phys, run as u32, SECTOR_SIZE as u32, &self.cipher_buf[..ct_len])?;  
 
-            encrypt_sector(&mut self.gcm, lba, counter, in_sector, &mut self.cipher_buf, &mut tag)?;
-
-            spi.write(data_phys, 1, SECTOR_SIZE as u32, &self.cipher_buf)?;
-
-            self.cached_meta.entries[idx].counter = counter;
-            self.cached_meta.entries[idx].tag = tag;
-            self.cached_meta_dirty = true;
+            done += run;
         }
 
         self.flush_meta(spi)?;
