@@ -12,6 +12,7 @@ use crate::spi_link::spi_master::SpiMaster;
 use crate::spi_link::api_spi::set_global_spi;
 use crate::crypto::secure_element::*;
 use crate::crypto::aes::*;
+use crate::crypto::encrypted_disk::{EncryptedDisk, set_global_disk};
 
 fn main() {
     // Obligatoire pour esp-idf-sys
@@ -46,7 +47,49 @@ fn main() {
 
     set_global_spi(&mut spi);
 
-    unsafe {
+    static mut DISK: Option<EncryptedDisk> = None;
+    
+    let key = match(|| -> Result<[u8; 32], i32>{
+        let se = AteccSession::new()?;
+        let volume_id: [u8; 16] = *b"bindkey-vol-0001";
+        derive_volume_key_hmac(&se, 9, volume_id)
+    })(){
+        Ok(k) => {
+            log::info!("Derived disk key from SE ok");
+            k
+        },
+        Err(err) => {
+            log::error!("derive_volume_key_hmac failed {} ({})", 
+                err,
+                unsafe{
+                    core::ffi::CStr::from_ptr(esp_err_to_name(err)).to_string_lossy()
+                } 
+            );
+            return;
+        }
+    };
+
+    unsafe{
+        match EncryptedDisk::new(&key){
+            Ok(d) => {
+                DISK = Some(d);
+                set_global_disk(DISK.as_mut().unwrap());
+                log::info!("EncryptedDisk initialized");
+            }
+            Err(err) => {
+                log::error!(
+                    "EncryptedDisk::new failed {} ({})",
+                    err,
+                    unsafe{ 
+                        core::ffi::CStr::from_ptr(esp_err_to_name(err)).to_string_lossy() 
+                    }
+                );
+                return;
+            }
+        }
+    }
+
+    unsafe{
         let err = init_fake_usb_msc();
         if err != ESP_OK {
             log::error!(

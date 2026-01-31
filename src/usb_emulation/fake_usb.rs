@@ -13,6 +13,8 @@ use core::sync::atomic::{AtomicU32, Ordering};
 
 use crate::spi_link::api_spi::get_global_spi;
 
+use crate::crypto::encrypted_disk::get_global_disk;
+
 //fake disk parameters, 4096 blocs = 2MiB => ok for the os to see a disk and mount/format it
 const BLOCK_SIZE: u16 = 512;
 const BLOCK_COUNT: u32 = 4096;
@@ -29,6 +31,8 @@ const SCSI_SENSE_NOT_READY: u8 = 0x02;
 const SCSI_SENSE_ILLEGAL_REQUEST: u8 = 0x05;
 const SCSI_ASC_LUN_NOT_READY: u8 = 0x04;
 const SCSI_ASCQ_BECOMING_READY: u8 = 0x01;
+const SCSI_SENSE_MEDIUM_ERROR: u8 = 0x03;
+const SCSI_ASC_UNRECOVERED_READ_ERROR: u8 = 0x11;
 
 
 //asc/ascq required
@@ -155,7 +159,15 @@ pub extern "C" fn tud_msc_capacity_cb(_lun: u8, block_count: *mut u32, block_siz
     let mut bs: u32 = BLOCK_SIZE as u32;
     let mut bc: u32 = BLOCK_COUNT;
 
-    if let Some(spi) = get_global_spi(){
+    if let (Some(spi), Some(disk)) = (get_global_spi(), get_global_disk()){
+        if let Ok((real_bs, logical_bc)) = disk.capacity_logical(spi){
+            if real_bs != 0 && logical_bc != 0{
+                bs = real_bs;
+                bc = logical_bc;
+            }
+        }
+    }
+    else if let Some(spi) = get_global_spi(){
         if let Ok((real_bs, real_bc)) = spi.get_capacity(){
             if real_bs != 0 && real_bc != 0{
                 bs = real_bs;
@@ -178,7 +190,10 @@ pub extern "C" fn tud_msc_capacity_cb(_lun: u8, block_count: *mut u32, block_siz
 #[no_mangle]
 pub extern "C" fn tud_msc_start_stop_cb(_lun: u8, _power_condition: u8, _start: bool, _load_eject: bool) -> bool{
     if _load_eject && !_start{
-        if let Some(spi) = get_global_spi(){
+        if let (Some(spi), Some(disk)) = (get_global_spi(), get_global_disk()){
+            let _ = disk.flush_all(spi);
+        }
+        else if let Some(spi) = get_global_spi(){
             let _ = spi.flush();
         }
     }
@@ -216,13 +231,26 @@ pub extern "C" fn tud_msc_read10_cb(lun: u8, _lba: u32, offset: u32, buffer: *mu
         core::slice::from_raw_parts_mut(buffer as *mut u8, bufsize as usize)
     };
 
-    match spi.read(_lba, nblocks, BLOCK_SIZE as u32, out){
-        Ok(()) => bufsize as i32,
-        Err(_e) => {
-            unsafe{
-                tud_msc_set_sense(lun, SCSI_SENSE_NOT_READY, SCSI_ASC_LUN_NOT_READY, SCSI_ASCQ_BECOMING_READY);
+    if let Some(disk) = get_global_disk(){
+        match disk.read10(spi, _lba, nblocks, out){
+            Ok(()) => bufsize as i32,
+            Err(_e) => {
+                unsafe{
+                    tud_msc_set_sense(lun, SCSI_SENSE_MEDIUM_ERROR, SCSI_ASC_UNRECOVERED_READ_ERROR, SCSI_ASCQ);
+                }
+                -1
             }
-            return -1;
+        }
+    }
+    else{
+        match spi.read(_lba, nblocks, BLOCK_SIZE as u32, out){
+            Ok(()) => bufsize as i32,
+            Err(_e) => {
+                unsafe{
+                    tud_msc_set_sense(lun, SCSI_SENSE_NOT_READY, SCSI_ASC_LUN_NOT_READY, SCSI_ASCQ_BECOMING_READY);
+                }
+                -1
+            }
         }
     }
 
@@ -260,13 +288,26 @@ pub extern "C" fn tud_msc_write10_cb(lun: u8, _lba: u32, offset: u32, _buffer: *
         core::slice::from_raw_parts(_buffer as *const u8, bufsize as usize)
     };
 
-    match spi.write(_lba, nblocks, BLOCK_SIZE as u32, data){
-        Ok(()) => bufsize as i32,
-        Err(_e) => {
-            unsafe{
-                tud_msc_set_sense(lun, SCSI_SENSE_NOT_READY, SCSI_ASC_LUN_NOT_READY, SCSI_ASCQ_BECOMING_READY);
+    if let Some(disk) = get_global_disk(){
+        match disk.write10(spi, _lba, nblocks, data){
+            Ok(()) => bufsize as i32,
+            Err(_e) => {
+                unsafe{
+                    tud_msc_set_sense(lun, SCSI_SENSE_MEDIUM_ERROR, SCSI_ASC_UNRECOVERED_READ_ERROR, SCSI_ASCQ);
+                }
+                -1
             }
-            return -1;
+        }
+    }
+    else{
+        match spi.write(_lba, nblocks, BLOCK_SIZE as u32, data){
+            Ok(()) => bufsize as i32,
+            Err(_e) => {
+                unsafe{
+                    tud_msc_set_sense(lun, SCSI_SENSE_NOT_READY, SCSI_ASC_LUN_NOT_READY, SCSI_ASCQ_BECOMING_READY);
+                }
+                -1
+            }
         }
     }
 }
