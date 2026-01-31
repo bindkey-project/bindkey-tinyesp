@@ -11,6 +11,7 @@ use crate::usb_emulation::fake_usb::*;
 use crate::spi_link::spi_master::SpiMaster;
 use crate::spi_link::api_spi::set_global_spi;
 use crate::crypto::secure_element::*;
+use crate::crypto::aes::*;
 
 fn main() {
     // Obligatoire pour esp-idf-sys
@@ -61,6 +62,17 @@ fn main() {
         Ok(()) => log::info!("Secure Element ok"),
         Err(e) => log::error!("Secure Element failed : {}", e)
     }
+
+    match test_aes_gcm(){
+        Ok(()) => log::info!("AES ok"),
+        Err(e) => log::error!("AES failed : {}", e)
+    }
+
+    match test_aes_gcm_with_se(9) {
+        Ok(()) => log::info!("AES-GCM(SE) ok"),
+        Err(rc) => log::error!("AES-GCM(SE) failed rc={}", rc),
+    }
+
 
     match test_fingerprint(){
         Ok(()) => log::info!("Fingerprint ok"),
