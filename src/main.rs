@@ -10,6 +10,7 @@ mod fingerprint;
 use crate::usb_emulation::fake_usb::*;
 use crate::spi_link::spi_master::SpiMaster;
 use crate::spi_link::api_spi::set_global_spi;
+use crate::fingerprint::*;
 use crate::crypto::secure_element::*;
 use crate::crypto::aes::*;
 use crate::crypto::encrypted_disk::{EncryptedDisk, set_global_disk};
@@ -20,6 +21,15 @@ fn main() {
 
     // Logs ESP
     EspLogger::initialize_default();
+
+    log::info!("Fingerprint authentication required...");
+    match fingerprint_validation(){
+        Ok(()) => log::info!("Fingerprint authenticated !"),
+        Err(e) => {
+            log::error!("Fingerprint error : {}", e);
+            return;
+        }
+    }
 
     log::info!("Starting fake USB MSC + SPI...");
 
@@ -110,35 +120,10 @@ fn main() {
         Err(rc) => log::error!("AES-GCM(SE) failed rc={}", rc),
     }
 
-
-    match test_fingerprint(){
-        Ok(()) => log::info!("Fingerprint ok"),
-        Err(e) => log::error!("Fingerprint failed : {}", e)
-    }
-
     log::info!("Fake MSC ready. Plug USB to host.");
 
     // IMPORTANT: ne jamais sortir de main
     loop {
         std::thread::sleep(std::time::Duration::from_secs(1));
     }
-}
-
-pub fn test_fingerprint() -> Result<(), Box<dyn std::error::Error>> {
-    fingerprint::init()?;
-    fingerprint::wipe_templates()?;
-    fingerprint::enroll_user()?;
-
-    // On exige 3 reconnaissances OK
-    for i in 1..=3 {
-        log::info!("🖐️ Test empreinte {i}/3 — pose ton doigt");
-
-        match fingerprint::check_once(5_000)? {
-            true => log::info!("✅ Doigt reconnu"),
-            false => return Err("Doigt non reconnu".into()),
-        }
-    }
-
-    log::info!("🎉 Fingerprint validé 3/3");
-    Ok(())
 }

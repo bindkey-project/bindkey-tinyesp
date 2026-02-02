@@ -330,3 +330,37 @@ pub fn check_once(timeout_ms: u32) -> Result<bool> {
     Ok(matched)
 }
 
+pub fn test_fingerprint() -> Result<(), Box<dyn std::error::Error>> {
+    // On exige 3 reconnaissances OK
+    for i in 1..=3 {
+        log::info!("🖐️ Test empreinte {i}/3 — pose ton doigt");
+
+        match check_once(5_000)? {
+            true => log::info!("✅ Doigt reconnu"),
+            false => return Err("Doigt non reconnu".into()),
+        }
+    }
+
+    log::info!("🎉 Fingerprint validé 3/3");
+    Ok(())
+}
+
+pub fn fingerprint_validation() -> Result<(), Box<dyn std::error::Error>>{
+    init()?;
+    match is_user_enrolled(){
+        Ok(true) => log::info!("User already enrolled, please verify yourself 3 times..."),
+        Ok(false) => {
+            log::warn!("No user enrolled, please enroll yourself...");
+            wipe_templates()?;
+            enroll_user()?;
+        }
+        Err(e) => return Err(e.into())
+    }
+
+    match test_fingerprint(){
+        Ok(()) => log::info!("User authenticated !"),
+        Err(e) => return Err(e.into())
+    }
+
+    Ok(())
+}
