@@ -335,7 +335,7 @@ pub fn test_fingerprint() -> Result<(), Box<dyn std::error::Error>> {
     for i in 1..=3 {
         log::info!("🖐️ Test empreinte {i}/3 — pose ton doigt");
 
-        match check_once(5_000)? {
+        match check_once(25_000)? {
             true => log::info!("✅ Doigt reconnu"),
             false => return Err("Doigt non reconnu".into()),
         }
@@ -347,6 +347,8 @@ pub fn test_fingerprint() -> Result<(), Box<dyn std::error::Error>> {
 
 pub fn fingerprint_validation() -> Result<(), Box<dyn std::error::Error>>{
     init()?;
+    //wipe_templates()?;
+    //enroll_user()?;
     match is_user_enrolled(){
         Ok(true) => log::info!("User already enrolled, please verify yourself 3 times..."),
         Ok(false) => {
@@ -362,5 +364,15 @@ pub fn fingerprint_validation() -> Result<(), Box<dyn std::error::Error>>{
         Err(e) => return Err(e.into())
     }
 
+    Ok(())
+}
+
+pub fn test_fingerprint_once() -> Result<(), Box<dyn std::error::Error>>{
+    log::info!("Test empreinte - pose ton doigt");
+    match check_once(25_000)?{
+        true => log::info!("Doigt reconnu"),
+        false => return Err("Doigt non reconnu".into())
+    }
+    log::info!("Fingerprint validé");
     Ok(())
 }

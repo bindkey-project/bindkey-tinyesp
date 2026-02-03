@@ -6,6 +6,7 @@ mod usb_emulation;
 mod spi_link;
 mod crypto;
 mod fingerprint;
+mod software_link;
 
 use crate::usb_emulation::fake_usb::*;
 use crate::spi_link::spi_master::SpiMaster;
@@ -14,6 +15,7 @@ use crate::fingerprint::*;
 use crate::crypto::secure_element::*;
 use crate::crypto::aes::*;
 use crate::crypto::encrypted_disk::{EncryptedDisk, set_global_disk};
+use crate::software_link::*;
 
 fn main() {
     // Obligatoire pour esp-idf-sys
@@ -120,10 +122,39 @@ fn main() {
         Err(rc) => log::error!("AES-GCM(SE) failed rc={}", rc),
     }
 
+    /*match test_fingerprint(){
+        Ok(()) => log::info!("Ok"),
+        Err(e) => log::error!("{}", e)
+    }*/
+
+    match uart_proto_task(){
+        Ok(()) => log::info!("valid"),
+        Err(e) => log::info!("invalid : {}", e)
+    }
+
     log::info!("Fake MSC ready. Plug USB to host.");
 
     // IMPORTANT: ne jamais sortir de main
     loop {
         std::thread::sleep(std::time::Duration::from_secs(1));
     }
+}
+
+pub fn test_fingerprint() -> Result<(), Box<dyn std::error::Error>> {
+    fingerprint::init()?;
+    fingerprint::wipe_templates()?;
+    fingerprint::enroll_user()?;
+
+    // On exige 3 reconnaissances OK
+    for i in 1..=3 {
+        log::info!("🖐️ Test empreinte {i}/3 — pose ton doigt");
+
+        match fingerprint::check_once(25_000)? {
+            true => log::info!("✅ Doigt reconnu"),
+            false => return Err("Doigt non reconnu".into()),
+        }
+    }
+
+    log::info!("🎉 Fingerprint validé 3/3");
+    Ok(())
 }
