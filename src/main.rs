@@ -25,13 +25,29 @@ fn main() {
     EspLogger::initialize_default();
 
     log::info!("Fingerprint authentication required...");
-    match fingerprint_validation(){
+    /*match fingerprint_validation(){
+        Ok(()) => log::info!("Fingerprint authenticated !"),
+        Err(e) => {
+            log::error!("Fingerprint error : {}", e);
+            return;
+        }
+    }*/
+    match fingerprint::init(){
+        Ok(()) => log::info!("Fingerprint init ok"),
+        Err(e) => {
+            log::error!("Fingerprint error : {}", e);
+            return;
+        }
+    }
+
+    match test_fingerprint_once(){
         Ok(()) => log::info!("Fingerprint authenticated !"),
         Err(e) => {
             log::error!("Fingerprint error : {}", e);
             return;
         }
     }
+    
 
     log::info!("Starting fake USB MSC + SPI...");
 
@@ -127,7 +143,12 @@ fn main() {
         Err(e) => log::error!("{}", e)
     }*/
 
-    match uart_proto_task(){
+    /*match uart_proto_task(){
+        Ok(()) => log::info!("valid"),
+        Err(e) => log::info!("invalid : {}", e)
+    }*/
+
+    match start_uart_task(1){
         Ok(()) => log::info!("valid"),
         Err(e) => log::info!("invalid : {}", e)
     }

@@ -1,7 +1,7 @@
 use core::{ffi::c_void, mem::zeroed, ptr};
 use esp_idf_sys as sys;
+use anyhow::anyhow;
 
-// tes bindings SE
 use crate::crypto::secure_element::*;
 use crate::fingerprint::*;
 
@@ -11,6 +11,11 @@ const TX_PIN: i32 = 42;
 const BAUD: i32 = 115_200;
 
 const SLOT: u16 = 0;
+
+#[inline(always)]
+fn yield_1tick() {
+    unsafe { sys::vTaskDelay(1) };
+}
 
 fn esp_err_to_result(err: i32) -> Result<(), i32> {
     if err == 0 { Ok(()) } else { Err(err) }
@@ -48,10 +53,11 @@ fn hex_val(c: u8) -> Option<u8> {
     }
 }
 
-// attend exactement 64 hex chars (optionnel: tu peux autoriser 0x... et espaces, mais restons simples)
+// attend exactement 64 hex chars
 fn hex_to_bytes_32(s: &str) -> Option<[u8; 32]> {
     let b = s.as_bytes();
     if b.len() != 64 {
+        log::error!("bad challenge len={}, expected 64", b.len());
         return None;
     }
     let mut out = [0u8; 32];
@@ -63,6 +69,8 @@ fn hex_to_bytes_32(s: &str) -> Option<[u8; 32]> {
     Some(out)
 }
 
+
+
 fn handle_enroll() {
     match (|| -> Result<([u8; 9], [u8; 64]), i32> {
         let se = AteccSession::new()?;
@@ -73,6 +81,13 @@ fn handle_enroll() {
         Ok((sn, pubkey))
     })() {
         Ok((sn, pubkey)) => {
+            /*match enroll_once(){
+                Ok(()) => log::info!("Enrolled !"),
+                Err(rc) => log::error!("Enroll error rc={}", rc)
+            }
+            log::info!("hello");*/
+            let _ = enroll_once();
+
             let mut hexbuf = [0u8; 256];
 
             uart_write_str("SN=");
@@ -88,37 +103,6 @@ fn handle_enroll() {
             uart_write_str("OK\n");
         }
         Err(rc) => uart_write_str(&format!("ERR={}\n", rc)),
-    }
-}
-
-fn handle_challenge_hex(hex: &str) {
-    let challenge = match hex_to_bytes_32(hex) {
-        Some(c) => c,
-        None => {
-            uart_write_str("ERR=bad_challenge\n");
-            return;
-        }
-    };
-
-    match test_fingerprint_once(){
-        Ok(()) => {
-            match (|| -> Result<[u8; 64], i32> {
-                let se = AteccSession::new()?;
-                let sig = se.sign(SLOT, &challenge)?; // typiquement [u8;64] R||S ou raw signature selon ton impl
-                log::info!("ECDSA signature (slot{})={:02X?}", SLOT, sig);
-                Ok(sig)
-            })() {
-                Ok(sig) => {
-                    let mut hexbuf = [0u8; 256];
-                    uart_write_str("SIG=");
-                    let n = bytes_to_hex_upper(&sig, &mut hexbuf);
-                    uart_write_bytes(&hexbuf[..n]);
-                    uart_write_str("\nOK\n");
-                }
-                Err(rc) => uart_write_str(&format!("ERR={}\n", rc)),
-            }
-        }
-        Err(rc) => uart_write_str(&format!("ERR={}\n", rc))
     }
 }
 
@@ -140,6 +124,40 @@ fn handle_uid() {
     }
 }
 
+fn handle_challenge_hex(hex: &str) {
+    let challenge = match hex_to_bytes_32(hex) {
+        Some(c) => c,
+        None => {
+            uart_write_str("ERR=bad_challenge\n");
+            return;
+        }
+    };
+
+    // fingerprint + signature
+    match test_fingerprint_once() {
+        Ok(()) => {
+            match (|| -> Result<[u8; 64], i32> {
+                let se = AteccSession::new()?;
+                let sig = se.sign(SLOT, &challenge)?;
+                log::info!("ECDSA signature (slot{})={:02X?}", SLOT, sig);
+                Ok(sig)
+            })() {
+                Ok(sig) => {
+                    let mut hexbuf = [0u8; 256];
+                    uart_write_str("SIG=");
+                    let n = bytes_to_hex_upper(&sig, &mut hexbuf);
+                    uart_write_bytes(&hexbuf[..n]);
+                    uart_write_str("\nOK\n");
+                }
+                Err(rc) => uart_write_str(&format!("ERR={}\n", rc)),
+            }
+        }
+        Err(e) => {
+            uart_write_str(&format!("ERR={}\n", e));
+        }
+    }
+}
+
 pub fn uart_proto_task() -> Result<(), i32> {
     unsafe {
         let mut cfg: sys::uart_config_t = zeroed();
@@ -149,7 +167,7 @@ pub fn uart_proto_task() -> Result<(), i32> {
         cfg.stop_bits = sys::uart_stop_bits_t_UART_STOP_BITS_1;
         cfg.flow_ctrl = sys::uart_hw_flowcontrol_t_UART_HW_FLOWCTRL_DISABLE;
         cfg.rx_flow_ctrl_thresh = 0;
-        cfg.flags = zeroed(); // flags bindgen typé chez toi
+        cfg.flags = zeroed();
 
         esp_err_to_result(sys::uart_param_config(UART_NUM, &cfg))?;
         esp_err_to_result(sys::uart_set_pin(
@@ -195,11 +213,9 @@ pub fn uart_proto_task() -> Result<(), i32> {
                             handle_enroll();
                         } else if let Some(hex) = msg.strip_prefix("challenge=") {
                             handle_challenge_hex(hex);
-                        }
-                        else if msg == "uid"{
+                        } else if msg == "uid" {
                             handle_uid();
-                        }
-                        else {
+                        } else {
                             uart_write_str("ERR=unknown_cmd\n");
                         }
 
@@ -216,7 +232,7 @@ pub fn uart_proto_task() -> Result<(), i32> {
                 }
             }
 
-            sys::vTaskDelay(1);
+            yield_1tick();
         }
     }
 }

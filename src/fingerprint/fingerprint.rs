@@ -335,7 +335,7 @@ pub fn test_fingerprint() -> Result<(), Box<dyn std::error::Error>> {
     for i in 1..=3 {
         log::info!("🖐️ Test empreinte {i}/3 — pose ton doigt");
 
-        match check_once(25_000)? {
+        match check_once(15_000)? {
             true => log::info!("✅ Doigt reconnu"),
             false => return Err("Doigt non reconnu".into()),
         }
@@ -367,12 +367,103 @@ pub fn fingerprint_validation() -> Result<(), Box<dyn std::error::Error>>{
     Ok(())
 }
 
-pub fn test_fingerprint_once() -> Result<(), Box<dyn std::error::Error>>{
+pub fn test_fingerprint_once() -> Result<(), Box<dyn std::error::Error>> {
+
     log::info!("Test empreinte - pose ton doigt");
-    match check_once(25_000)?{
-        true => log::info!("Doigt reconnu"),
-        false => return Err("Doigt non reconnu".into())
+
+    let matched = wait_and_identify_sliced(
+        25_000, // temps max pour poser le doigt
+        200,    // slice attente doigt (200-500ms conseillé)
+        10_000, // temps pour l'identification (scan)
+    )?;
+
+    if matched {
+        log::info!("Doigt reconnu");
+    } else {
+        return Err("Doigt non reconnu".into());
     }
+
     log::info!("Fingerprint validé");
+    Ok(())
+}
+
+pub fn wait_and_identify_sliced(
+    wait_total_ms: u32,
+    wait_slice_ms: u16,
+    identify_ms: u32,
+) -> Result<bool> {
+    let ctx = SENSOR_CTX.lock().unwrap();
+    if !ctx.is_set() {
+        return Err(anyhow!("BM-Lite not initialized"));
+    }
+
+    let start_us = unsafe { esp_idf_sys::esp_timer_get_time() } as i64;
+    let total_timeout_us = (wait_total_ms as i64) * 1000;
+
+    // --- Phase A: attendre doigt en tranches courtes ---
+    loop {
+        let now_us = unsafe { esp_idf_sys::esp_timer_get_time() } as i64;
+        if now_us - start_us >= total_timeout_us {
+            return Ok(false); // pas de doigt dans le temps imparti
+        }
+
+        let rc = unsafe { sensor_wait_finger_present(ctx.chain, wait_slice_ms) };
+        if rc == 0 {
+            break; // doigt détecté
+        }
+
+        // laisse respirer (anti-WDT)
+        unsafe { esp_idf_sys::vTaskDelay(1) };
+    }
+
+    // --- Phase B: identify (laisser le temps de scanner) ---
+    let mut tid: u16 = 0;
+    let mut matched = false;
+    unsafe {
+        check_bep(
+            bep_identify_finger(ctx.chain, identify_ms, &mut tid, &mut matched),
+            "bep_identify_finger",
+        )?;
+    }
+
+    // --- Phase C: attendre retrait (optionnel) ---
+    unsafe {
+        let _ = sensor_wait_finger_not_present(ctx.chain, 5000);
+    }
+
+    if matched {
+        log::info!("Matched template id = {}", tid);
+    }
+
+    Ok(matched)
+}
+
+pub fn enroll_once() -> Result<(), i32>{
+    let mut wiped = 0;
+    let mut enrolled = 0;
+    
+    while wiped != 1{
+        match wipe_templates(){
+            Ok(()) => {
+                log::info!("OK wipe_templates");
+                wiped = 1;
+            }
+            Err(rc) => {
+                log::error!("Erreur wipe_templates: rc={}", rc);
+            }
+        }
+    }
+    while enrolled != 1{
+        match enroll_user(){
+            Ok(()) => {
+                log::info!("OK enroll_user");
+                enrolled = 1;
+            }
+            Err(rc) => {
+                log::error!("Erreur enroll_user rc={}", rc);
+            }
+        }
+    }
+
     Ok(())
 }
