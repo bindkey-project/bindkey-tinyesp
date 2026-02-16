@@ -1,6 +1,5 @@
 use core::{ffi::c_void, mem::zeroed, ptr};
 use esp_idf_sys as sys;
-use anyhow::anyhow;
 
 use crate::crypto::secure_element::*;
 use crate::fingerprint::*;
