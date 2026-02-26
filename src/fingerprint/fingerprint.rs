@@ -347,8 +347,8 @@ pub fn test_fingerprint() -> Result<(), Box<dyn std::error::Error>> {
 
 pub fn fingerprint_validation() -> Result<(), Box<dyn std::error::Error>>{
     init()?;
-    //wipe_templates()?;
-    //enroll_user()?;
+    wipe_templates()?;
+    enroll_user()?;
     match is_user_enrolled(){
         Ok(true) => log::info!("User already enrolled, please verify yourself 3 times..."),
         Ok(false) => {

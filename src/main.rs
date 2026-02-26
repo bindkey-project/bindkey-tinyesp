@@ -40,6 +40,9 @@ fn main() {
         }
     }
 
+    //let _ = fingerprint::wipe_templates();
+    //let _ = fingerprint::enroll_user();
+
     match test_fingerprint_once(){
         Ok(()) => log::info!("Fingerprint authenticated !"),
         Err(e) => {

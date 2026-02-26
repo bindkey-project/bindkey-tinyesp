@@ -103,7 +103,7 @@ pub unsafe fn init_fake_usb_msc() -> esp_err_t{
             vbus_monitor_io: 0,
         },
         task: tinyusb_task_config_t{
-            size: 4096,
+            size: 32768,
             priority: 5,
             xCoreID: 0,
         },
