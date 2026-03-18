@@ -4,7 +4,7 @@
 //   [5]      G (sanity)
 //   [6..8]   reserved
 //   [8..12]  seq (u32) (optional)
-//   [12..16] crc32 (optional, 0 at the moment)
+//   [12..16] crc32 (CRC32 IEEE 802.3, champ lui-même = 0 lors du calcul)
 //   [16..32] reserved
 //   [32..]   entries (G * 20 bytes) = 480 bytes for G=24
 
@@ -17,6 +17,37 @@ pub const META_MAGIC: [u8; 4] = *b"BKMD";
 pub const META_VERSION: u8 = 1;
 pub const META_HEADER_LEN: usize = 32;
 pub const META_ENTRY_LEN: usize = 4 + TAG_LEN; //counter + tag
+
+#[inline]
+fn crc32_step(mut crc: u32, b: u8) -> u32{
+    // ^= XOR
+    crc ^= b as u32;
+    for _ in 0..8{
+        if crc & 1 != 0{
+            crc = (crc >> 1) ^ 0xEDB8_8320;
+        }
+        else{
+            crc >>= 1;
+        }
+    }
+    crc
+
+}
+
+fn crc32_meta_buf(buf: &[u8]) -> u32{
+    // CRC32 avec [12..16] traité comme zéro (champ CRC exclu du calcul)
+    let mut crc: u32 = 0xFFFF_FFFF;
+    for &b in &buf[..12]{
+        crc = crc32_step(crc, b);
+    }
+    for _ in 0..4{
+        crc = crc32_step(crc, 0);
+    }
+    for &b in &buf[16..]{
+        crc = crc32_step(crc, b);
+    }
+    !crc
+}
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct MetaEntry{
@@ -60,6 +91,12 @@ impl MetaSector{
         }
         if buf[5] != (G as u8){
             return Err(ESP_ERR_INVALID_RESPONSE);
+        }
+
+        let stored_crc = u32::from_le_bytes(buf[12..16].try_into().unwrap());
+        let computed_crc = crc32_meta_buf(buf);
+        if stored_crc != computed_crc{
+            return Err(ESP_ERR_INVALID_CRC);
         }
 
         let seq = u32::from_le_bytes(buf[8..12].try_into().unwrap());
@@ -118,6 +155,9 @@ impl MetaSector{
             buf[off..off + TAG_LEN].copy_from_slice(&e.tag);
             off += TAG_LEN;
         }
+
+        let crc = crc32_meta_buf(buf);
+        buf[12..16].copy_from_slice(&crc.to_le_bytes());
 
         Ok(())
     }

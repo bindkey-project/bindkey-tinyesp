@@ -5,10 +5,6 @@ use super::protocol::{Cmd, Header, MAGIC, MAX_PAYLOAD, RESP_FLAG, VERSION};
 pub const HDR_LEN: usize = core::mem::size_of::<Header>();
 pub const FRAME_LEN: usize = HDR_LEN + MAX_PAYLOAD;
 
-extern "C"{
-    fn ets_delay_us(us: u32);
-}
-
 #[derive(Default)]
 struct Perf{
     ops: u64,
@@ -221,7 +217,7 @@ impl SpiMaster{
             if now - start >= timeout_us{
                 return Err(ESP_ERR_TIMEOUT);
             }
-            unsafe {ets_delay_us(50)};
+            unsafe {vTaskDelay(1)};
         }
         Ok(())
     }
@@ -246,83 +242,16 @@ impl SpiMaster{
         Ok(())
     }
 
-    //ajout helper opti perf
-    #[inline]
-    pub fn build_read_req(&mut self, chunk_idx: u16, lba_start: u32, nblocks_total: u32) -> u16{
-        let seq = self.next_seq();
-
-        self.tx_buf_mut().fill(0);
-        self.rx.as_mut().fill(0);
-
-        let mut req = Header::new(Cmd::Read, seq, lba_start, nblocks_total);
-        req.reserved = chunk_idx;
-
-        let req_bytes = unsafe {
-            slice::from_raw_parts((&req as *const Header) as *const u8, HDR_LEN)
-        };
-        self.tx_buf_mut()[..HDR_LEN].copy_from_slice(req_bytes);
-
-        seq
-    }
-
-    pub(crate) fn build_write_req(&mut self, chunk_idx: u16, lba_start: u32, nblocks_total: u32, payload: &[u8]) -> Result<u16, i32>{
-        if payload.len() > MAX_PAYLOAD{
-            return Err(ESP_ERR_INVALID_SIZE);
-        }
-
-        let seq = self.next_seq();
-        self.tx_buf_mut().fill(0);
-        self.rx.as_mut().fill(0);
-
-        let mut req = Header::new(Cmd::Write, seq, lba_start, nblocks_total);
-        req.reserved = chunk_idx;
-
-        let req_bytes = unsafe{
-            slice::from_raw_parts((&req as *const Header) as *const u8, HDR_LEN)
-        };
-        self.tx_buf_mut()[..HDR_LEN].copy_from_slice(req_bytes);
-        self.tx_buf_mut()[HDR_LEN..HDR_LEN + payload.len()].copy_from_slice(payload);
-
-        Ok(seq)
-    }
-
     #[inline]
     pub fn read_resp_header(&self) -> Header{
         unsafe { ptr::read_unaligned(self.rx.ptr as *const Header) }
     }
 
-    pub(crate) fn send_dummy_getstatus(&mut self) -> Result<u16, i32> {
-        let seq = self.next_seq();
-
-        self.tx_buf_mut().fill(0);
-        self.rx.as_mut().fill(0);
-
-        let mut req = Header::new(Cmd::GetStatus, seq, 0, 0);
-        req.reserved = 0;
-
-        let req_bytes = unsafe {
-            slice::from_raw_parts((&req as *const Header) as *const u8, HDR_LEN)
-        };
-        self.tx_buf_mut()[..HDR_LEN].copy_from_slice(req_bytes);
-
-        self.spi_xfer(FRAME_LEN)?;
-        Ok(seq)
-    }
-
-    pub(crate) fn prof_add(&mut self, req_us: u64, wait_us: u64, resp_us: u64){
-        self.perf.req_us += req_us;
-        self.perf.wait_us += wait_us;
-        self.perf.resp_us += resp_us;
-        self.perf.ops += 1;
-        self.perf.log_if_needed();
-    }
-
-    pub fn cmd_frame(&mut self, cmd: Cmd, chunk_idx: u16, arg0: u32, arg1: u32, ready_timeout_ms: u32) -> Result<(Header, u16), i32>{
+    pub fn cmd_frame(&mut self, cmd: Cmd, chunk_idx: u16, arg0: u32, arg1: u32, ready_timeout_ms: u32, resp_payload_len: usize) -> Result<(Header, u16), i32>{
         let seq = self.next_seq();
 
         //phase 1: REQ
         self.tx_buf_mut().fill(0);
-        self.rx.as_mut().fill(0);
 
         let mut req = Header::new(cmd, seq, arg0, arg1);
         req.reserved = chunk_idx;
@@ -331,7 +260,7 @@ impl SpiMaster{
         self.tx_buf_mut()[..HDR_LEN].copy_from_slice(req_bytes);
 
         let t0 = unsafe { esp_timer_get_time() as i64 };
-        self.spi_xfer(FRAME_LEN)?;
+        self.spi_xfer(HDR_LEN)?;
         let t1 = unsafe { esp_timer_get_time() as i64 };
 
         //wait READY
@@ -339,10 +268,8 @@ impl SpiMaster{
         let t2 = unsafe { esp_timer_get_time() as i64 };
 
         //phase 2: RESP
-        self.tx_buf_mut().fill(0);
-        self.rx.as_mut().fill(0);
 
-        self.spi_xfer(FRAME_LEN)?;
+        self.spi_xfer(HDR_LEN + resp_payload_len)?;
         let t3 = unsafe { esp_timer_get_time() as i64 };
 
         self.perf.req_us += (t1 - t0) as u64;
@@ -365,27 +292,69 @@ impl SpiMaster{
         }
 
         self.tx_buf_mut().fill(0);
-        self.rx.as_mut().fill(0);
 
         let mut req = Header::new(Cmd::Write, seq, lba_start, nblocks_total);
         req.reserved = chunk_idx;
-
         let req_bytes = unsafe{slice::from_raw_parts((&req as *const Header) as *const u8, HDR_LEN)};
         self.tx_buf_mut()[..HDR_LEN].copy_from_slice(req_bytes);
-        self.tx_buf_mut()[HDR_LEN..HDR_LEN + payload.len()].copy_from_slice(payload);
 
         let t0 = unsafe { esp_timer_get_time() as i64 };
-        self.spi_xfer(FRAME_LEN)?;
+        self.spi_xfer(HDR_LEN)?;
         let t1 = unsafe { esp_timer_get_time() as i64 };
 
         Self::wait_ready(ready_timeout_ms)?;
         let t2 = unsafe { esp_timer_get_time() as i64 };
 
-        self.tx_buf_mut().fill(0);
-        self.rx.as_mut().fill(0);
-
-        self.spi_xfer(FRAME_LEN)?;
+        self.tx_buf_mut()[..payload.len()].copy_from_slice(payload);
+        self.spi_xfer(payload.len())?;
         let t3 = unsafe { esp_timer_get_time() as i64 };
+
+        Self::wait_ready(ready_timeout_ms)?;
+        let t4 = unsafe{ esp_timer_get_time() as i64 };
+
+        self.tx_buf_mut()[..HDR_LEN].fill(0);
+        self.spi_xfer(HDR_LEN)?;
+        let t5 = unsafe{ esp_timer_get_time() as i64};
+
+
+        self.perf.req_us += (t1 - t0) as u64;
+        self.perf.wait_us += (t2 - t1 + t4 - t3) as u64;
+        self.perf.resp_us += (t5 - t4) as u64;
+        self.perf.ops += 1;
+        self.perf.log_if_needed();
+
+        let resp: Header = unsafe{ptr::read_unaligned(self.rx.ptr as *const Header)};
+        Self::validate_resp(&resp, seq, chunk_idx)?;
+
+        Ok((resp, seq))
+    }
+
+    pub fn read_frame(&mut self, chunk_idx: u16, lba_start: u32, nblocks_total: u32, chunk_len: usize, ready_timeout_ms: u32) -> Result<(Header, u16), i32>{
+        if HDR_LEN + chunk_len > FRAME_LEN{
+            return Err(ESP_ERR_INVALID_SIZE);
+        }
+
+        let seq = self.next_seq();
+
+        self.tx_buf_mut().fill(0);
+
+        let mut req = Header::new(Cmd::Read, seq, lba_start, nblocks_total);
+        req.reserved = chunk_idx;
+        let req_bytes = unsafe{
+            slice::from_raw_parts((&req as *const Header) as *const u8, HDR_LEN)
+        };
+        self.tx_buf_mut()[..HDR_LEN].copy_from_slice(req_bytes);
+
+        let t0 = unsafe{ esp_timer_get_time() as i64 };
+        self.spi_xfer(HDR_LEN)?;
+        let t1 = unsafe{ esp_timer_get_time() as i64 };
+
+        Self::wait_ready(ready_timeout_ms)?;
+        let t2 = unsafe{ esp_timer_get_time() as i64 };
+
+        self.tx_buf_mut()[..HDR_LEN + chunk_len].fill(0);
+        self.spi_xfer(HDR_LEN + chunk_len)?;
+        let t3 = unsafe{ esp_timer_get_time() as i64 };
 
         self.perf.req_us += (t1 - t0) as u64;
         self.perf.wait_us += (t2 - t1) as u64;
