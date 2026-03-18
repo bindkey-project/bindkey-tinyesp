@@ -122,8 +122,8 @@ pub unsafe fn init_fake_usb_msc() -> esp_err_t{
 pub extern "C" fn tud_msc_inquiry_cb(_lun: u8, vendor_id: *mut u8, product_id: *mut u8, product_rev: *mut u8){
     unsafe{
         let vid = b"BindKey\0";            // <= 8 chars recommended
-        let pid = b"SPI Tunnel MSC\0";     // <= 16 chars recommended
-        let rev = b"0.1\0";               // <= 4 chars recommended
+        let pid = b"BINDKEY\0";            // <= 16 chars recommended à modif
+        let rev = b"0.1\0";                // <= 4 chars recommended
 
         ptr::copy_nonoverlapping(vid.as_ptr(), vendor_id, 8.min(vid.len()));
         ptr::copy_nonoverlapping(pid.as_ptr(), product_id, 16.min(pid.len()));
