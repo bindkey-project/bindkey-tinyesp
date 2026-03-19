@@ -1,9 +1,15 @@
-use core::{ptr, slice};
+use core::{ptr, slice, sync::atomic::{AtomicU32, Ordering}};
 use esp_idf_sys::*;
 use super::pins::*;
 use super::protocol::{Cmd, Header, MAGIC, MAX_PAYLOAD, RESP_FLAG, VERSION};
 pub const HDR_LEN: usize = core::mem::size_of::<Header>();
 pub const FRAME_LEN: usize = HDR_LEN + MAX_PAYLOAD;
+
+extern "C" {                                                                                                                                                                                                                              
+      fn ets_delay_us(us: u32);
+}
+
+static IDLE_FEED_CTR: AtomicU32 = AtomicU32::new(0);
 
 #[derive(Default)]
 struct Perf{
@@ -217,7 +223,11 @@ impl SpiMaster{
             if now - start >= timeout_us{
                 return Err(ESP_ERR_TIMEOUT);
             }
-            unsafe {vTaskDelay(1)};
+            unsafe {ets_delay_us(5)};
+        }
+
+        if IDLE_FEED_CTR.fetch_add(1, Ordering::Relaxed) % 200 == 0{
+            unsafe{vTaskDelay(1)};
         }
         Ok(())
     }

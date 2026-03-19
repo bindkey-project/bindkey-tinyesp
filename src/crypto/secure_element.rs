@@ -17,6 +17,8 @@ pub const ATCA_SIG_SIZE: usize = 64;
 
 pub const SHA_MODE_TARGET_OUT_ONLY: u8  = 0xC0;
 
+pub const GPT_VOLUME_ID: [u8; 16] = *b"bindkey-mbr-v000";
+
 #[repr(C)]
 pub struct ATCAIfaceCfg {
     _private: [u8; 0] //opaque config no display to rust layout

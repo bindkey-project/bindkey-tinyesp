@@ -78,27 +78,27 @@ fn main() {
 
     set_global_spi(&mut spi);
     
-    let key = match(|| -> Result<[u8; 32], i32>{
+    let (gpt_key, vol_key) = match(|| -> Result<([u8; 32], [u8; 32]), i32>{
         let se = AteccSession::new()?;
-        let volume_id: [u8; 16] = *b"bindkey-vol-0001";
-        derive_volume_key_hmac(&se, 9, volume_id)
+        let gpt_key = derive_volume_key_hmac(&se, 9, GPT_VOLUME_ID)?;
+        let vol_id: [u8; 16] = *b"bindkey-vol-0001";
+        let vol_key = derive_volume_key_hmac(&se, 9, vol_id)?;
+        Ok((gpt_key, vol_key))
     })(){
         Ok(k) => {
-            log::info!("Derived disk key from SE ok");
+            log::info!("Derived GPT key and volume key from SE ok");
             k
         },
         Err(err) => {
-            log::error!("derive_volume_key_hmac failed {} ({})", 
-                err,
-                unsafe{
-                    core::ffi::CStr::from_ptr(esp_err_to_name(err)).to_string_lossy()
-                } 
-            );
+            log::error!("derive_volume_key_from_hmac failed {} ({})", 
+                        err, 
+                        unsafe{core::ffi::CStr::from_ptr(esp_err_to_name(err)).to_string_lossy()});
             return;
         }
     };
+    let _gpt_key = gpt_key;
 
-    let mut disk_box: Box<EncryptedDisk> = match EncryptedDisk::new(&key){
+    let mut disk_box: Box<EncryptedDisk> = match EncryptedDisk::new(&vol_key){
         Ok(d) => Box::new(d),
         Err(err) => {
             log::error!(
