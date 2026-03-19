@@ -6,11 +6,11 @@ use std::sync::Mutex;
 use esp_idf_svc::sys::bmlite::{
     // GPIO / SPI types et constantes
     gpio_num_t_GPIO_NUM_16,
-    gpio_num_t_GPIO_NUM_35,
-    gpio_num_t_GPIO_NUM_36,
-    gpio_num_t_GPIO_NUM_37,
-    gpio_num_t_GPIO_NUM_45,
-    gpio_num_t_GPIO_NUM_48,
+    gpio_num_t_GPIO_NUM_17,
+    gpio_num_t_GPIO_NUM_8,
+    gpio_num_t_GPIO_NUM_15,
+    gpio_num_t_GPIO_NUM_7,
+    gpio_num_t_GPIO_NUM_18,
     interface_t,
     interface_t_SPI_INTERFACE,
     pin_config_t,
@@ -169,12 +169,12 @@ unsafe fn alloc_config() -> Result<(*mut Params, *mut pin_config_t, *mut HCP_com
 
     let pins = Box::into_raw(Box::new(pin_config_t {
         spi_host: spi_host_device_t_SPI2_HOST,
-        cs_n_pin: gpio_num_t_GPIO_NUM_45,
-        miso_pin: gpio_num_t_GPIO_NUM_37,
-        rst_pin: gpio_num_t_GPIO_NUM_48,
-        mosi_pin: gpio_num_t_GPIO_NUM_35,
-        irq_pin: gpio_num_t_GPIO_NUM_16,
-        spi_clk_pin: gpio_num_t_GPIO_NUM_36,
+        cs_n_pin: gpio_num_t_GPIO_NUM_7,
+        miso_pin: gpio_num_t_GPIO_NUM_15,
+        rst_pin: gpio_num_t_GPIO_NUM_16,
+        mosi_pin: gpio_num_t_GPIO_NUM_17,
+        irq_pin: gpio_num_t_GPIO_NUM_18,
+        spi_clk_pin: gpio_num_t_GPIO_NUM_8,
     }));
 
     let params = Box::into_raw(Box::new(Params {

@@ -217,6 +217,7 @@ impl SpiMaster{
     pub(crate) fn wait_ready(timeout_ms: u32) -> Result<(), i32>{
         let start = unsafe {esp_timer_get_time() as i64};
         let timeout_us = (timeout_ms as i64) * 1000;
+        let mut poll_ctr: u32 = 0;
 
         while unsafe {gpio_get_level(PIN_READY as gpio_num_t)} == 0{
             let now = unsafe {esp_timer_get_time() as i64};
@@ -224,6 +225,10 @@ impl SpiMaster{
                 return Err(ESP_ERR_TIMEOUT);
             }
             unsafe {ets_delay_us(5)};
+            poll_ctr = poll_ctr.wrapping_add(1);
+            if poll_ctr % 1000 == 0{
+                unsafe{vTaskDelay(1)};
+            }
         }
 
         if IDLE_FEED_CTR.fetch_add(1, Ordering::Relaxed) % 200 == 0{

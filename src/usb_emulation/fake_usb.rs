@@ -313,7 +313,7 @@ pub extern "C" fn tud_msc_write10_cb(lun: u8, _lba: u32, offset: u32, _buffer: *
 }
 
 //optionnal : hook if OS asks non defined things
-/*#[no_mangle]
+#[no_mangle]
 pub extern "C" fn tud_msc_scsi_cb(lun: u8, _scsi_cmd: *const u8, _buf: *mut core::ffi::c_void, _bufsize: u16) -> i32 {
     if _scsi_cmd.is_null(){
         unsafe{
@@ -334,4 +334,4 @@ pub extern "C" fn tud_msc_scsi_cb(lun: u8, _scsi_cmd: *const u8, _buf: *mut core
         tud_msc_set_sense(lun, SCSI_SENSE_ILLEGAL_REQUEST, SCSI_ASC_INVALID_FIELD_IN_CDB, SCSI_ASCQ)
     };
     return -1;
-}*/
+}

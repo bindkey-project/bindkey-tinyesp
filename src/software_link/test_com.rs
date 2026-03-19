@@ -5,8 +5,8 @@ use crate::crypto::secure_element::*;
 use crate::fingerprint::*;
 
 const UART_NUM: sys::uart_port_t = 1;
-const RX_PIN: i32 = 41;
-const TX_PIN: i32 = 42;
+const RX_PIN: i32 = 1;
+const TX_PIN: i32 = 2;
 const BAUD: i32 = 115_200;
 
 const SLOT: u16 = 0;
