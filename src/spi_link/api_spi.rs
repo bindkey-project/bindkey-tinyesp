@@ -153,11 +153,13 @@ impl SpiMaster{
 
             let st = resp.arg0 as i32;
             if st != ESP_OK{
+                log::error!("spi write: slave returned error st={} lba={} chunk={}", st, lba_start, chunk_idx);
                 return Err(st);
             }
 
             let written = resp.arg1 as usize;
             if written != chunk_len{
+                log::error!("spi write: size mismatch written={} expected={} lba={} chunk={}", written, chunk_len, lba_start, chunk_idx);
                 return Err(ESP_ERR_INVALID_RESPONSE);
             }
 

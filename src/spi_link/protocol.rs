@@ -5,6 +5,24 @@ pub const VERSION: u8 = 1;
 pub const RESP_FLAG: u8 = 0x80;
 
 pub const MAX_PAYLOAD: usize = 8192; //512 test ok => 4096
+pub const CRC_LEN: usize = 4;
+
+#[inline]
+pub fn spi_crc32(data: &[u8]) -> u32{
+    let mut crc: u32 = 0xFFFF_FFFF;
+    for &b in data{
+        crc ^= b as u32;
+        for _ in 0..8{
+            if crc & 1 != 0{
+                crc = (crc >> 1) ^ 0xEDB8_8320;
+            }
+            else{
+                crc >>= 1;
+            }
+        }
+    }
+    !crc
+}
 
 // Payload conventions:
 //

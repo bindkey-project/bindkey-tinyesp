@@ -53,6 +53,11 @@ impl EncryptedDisk{
         })
     }
 
+    pub fn invalidate_meta_cache(&mut self){
+        self.cached_meta_lba = None;
+        self.cached_meta_dirty = false;
+    }
+
     pub fn capacity_logical(&mut self, spi: &mut SpiMaster) -> Result<(u32, u32), i32>{
         let (bs, bc_phys) = spi.get_capacity()?;
         validate_block_size(bs)?;
@@ -92,7 +97,10 @@ impl EncryptedDisk{
             }
 
             let ct_len = run * SECTOR_SIZE;
-            spi.read(data_phys, run as u32, SECTOR_SIZE as u32, &mut self.cipher_buf[..ct_len])?;
+            if let Err(e) = spi.read(data_phys, run as u32, SECTOR_SIZE as u32, &mut self.cipher_buf[..ct_len]){
+                log::error!("disk read10: spi.read failed lba_phys={} run={} err={}", data_phys, run, e);
+                return Err(e);
+            }
 
             for j in 0..run{
                 let entry = self.cached_meta.entries[idx + j];
@@ -105,7 +113,12 @@ impl EncryptedDisk{
 
                 let ct_sector = &self.cipher_buf[j * SECTOR_SIZE..(j+1) * SECTOR_SIZE];
 
-                decrypt_sector(&mut self.gcm, lba.wrapping_add(j as u32), entry.counter, ct_sector, &entry.tag, out_sector)?;
+                if let Err(e) = decrypt_sector(&mut self.gcm, lba.wrapping_add(j as u32), entry.counter, ct_sector, &entry.tag, out_sector){
+                    // GCM auth failure (-18): sector is corrupted (meta/data mismatch after failed write).
+                    // Fill zeros instead of hard error to prevent OS from unmounting the entire disk.
+                    log::error!("disk read10: decrypt failed lba={} counter={} err={}, returning zeros", lba.wrapping_add(j as u32), entry.counter, e);
+                    out_sector.fill(0);
+                }
             }
             done += run;
         }
@@ -156,13 +169,28 @@ impl EncryptedDisk{
                 self.cached_meta_dirty = true;
             }
 
+            // write data FIRST: if data fails, meta stays old = state is consistent
             let ct_len = run * SECTOR_SIZE;
-            spi.write(data_phys, run as u32, SECTOR_SIZE as u32, &self.cipher_buf[..ct_len])?;  
+            if let Err(e) = spi.write(data_phys, run as u32, SECTOR_SIZE as u32, &self.cipher_buf[..ct_len]){
+                log::error!("write10: data write failed lba={} err={}, invalidating cache", lba, e);
+                self.cached_meta_lba = None;
+                self.cached_meta_dirty = false;
+                return Err(e);
+            }
+
+            // then flush meta (counter + tag)
+            if let Err(e) = self.flush_meta(spi){
+                // meta flush failed after data written: data is on disk with new ciphertext
+                // but meta still has old counter/tag — next read will fail GCM
+                // invalidate cache so next write re-reads meta from disk
+                log::error!("write10: meta flush failed after data write lba={} err={}", lba, e);
+                self.cached_meta_lba = None;
+                self.cached_meta_dirty = false;
+                return Err(e);
+            }
 
             done += run;
         }
-
-        self.flush_meta(spi)?;
 
         Ok(())
     }

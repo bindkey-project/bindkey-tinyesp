@@ -1,9 +1,9 @@
 use core::{ptr, slice, sync::atomic::{AtomicU32, Ordering}};
 use esp_idf_sys::*;
 use super::pins::*;
-use super::protocol::{Cmd, Header, MAGIC, MAX_PAYLOAD, RESP_FLAG, VERSION};
+use super::protocol::{Cmd, Header, MAGIC, MAX_PAYLOAD, RESP_FLAG, VERSION, CRC_LEN, spi_crc32};
 pub const HDR_LEN: usize = core::mem::size_of::<Header>();
-pub const FRAME_LEN: usize = HDR_LEN + MAX_PAYLOAD;
+pub const FRAME_LEN: usize = HDR_LEN + MAX_PAYLOAD + CRC_LEN;
 
 extern "C" {                                                                                                                                                                                                                              
       fn ets_delay_us(us: u32);
@@ -98,6 +98,7 @@ impl Drop for DmaBuf{
 pub struct SpiMaster{
     dev: spi_device_handle_t,
     seq: u16,
+    needs_resync: bool,
 
     //persistant buffers (DMA-capable) : nothing on the stack
     tx: DmaBuf,
@@ -108,7 +109,7 @@ pub struct SpiMaster{
 
 impl SpiMaster{
     pub fn new() -> Result<Self, i32>{
-        Ok(Self{dev: ptr::null_mut(), seq: 1, tx: DmaBuf::alloc(FRAME_LEN)?, rx: DmaBuf::alloc(FRAME_LEN)?, perf: Perf::default()})
+        Ok(Self{dev: ptr::null_mut(), seq: 1, needs_resync: false, tx: DmaBuf::alloc(FRAME_LEN)?, rx: DmaBuf::alloc(FRAME_LEN)?, perf: Perf::default()})
     }
 
     //called once at boot
@@ -231,8 +232,28 @@ impl SpiMaster{
             }
         }
 
+        // After READY goes HIGH, the slave has signaled readiness but may not
+        // have called spi_slave_xfer yet (DMA not armed). Give it time to
+        // enter spi_slave_transmit and configure DMA descriptors before we
+        // start clocking data on the bus.
+        unsafe{ ets_delay_us(50) };
+
         if IDLE_FEED_CTR.fetch_add(1, Ordering::Relaxed) % 200 == 0{
             unsafe{vTaskDelay(1)};
+        }
+        Ok(())
+    }
+
+    pub(crate) fn wait_ready_low(timeout_ms: u32) -> Result<(), i32>{
+        let start = unsafe{esp_timer_get_time() as i64};
+        let timeout_us = (timeout_ms as i64) * 1000;
+        
+        while unsafe{gpio_get_level(PIN_READY as gpio_num_t)} != 0{
+            let now = unsafe{esp_timer_get_time() as i64};
+            if now - start >= timeout_us{
+                return Err(ESP_ERR_TIMEOUT);
+            }
+            unsafe{ets_delay_us(5)};
         }
         Ok(())
     }
@@ -243,16 +264,21 @@ impl SpiMaster{
         let resp_cmd = resp.cmd;
 
         if resp.magic != MAGIC || resp.version != VERSION{
+            log::error!("validate_resp FAIL: bad magic/ver magic=[{:#04x},{:#04x}] ver={} | expected magic={:?} ver={}",
+                resp.magic[0], resp.magic[1], resp.version, MAGIC, VERSION);
             return Err(ESP_ERR_INVALID_RESPONSE);
         }
         if (resp_cmd & RESP_FLAG) == 0{
+            log::error!("validate_resp FAIL: no RESP_FLAG cmd={:#04x}", resp_cmd);
             return Err(ESP_ERR_INVALID_RESPONSE);
         }
         if resp_seq != seq{
+            log::error!("validate_resp FAIL: seq mismatch resp_seq={} expected={} cmd={:#04x}", resp_seq, seq, resp_cmd);
             return Err(ESP_ERR_INVALID_RESPONSE);
         }
         if resp_reserved != chunk_idx{
-            log::warn!("spi_master: chunk mismatch resp={} expected={}", resp_reserved, chunk_idx);
+            log::error!("validate_resp FAIL: chunk mismatch resp={} expected={} seq={}", resp_reserved, chunk_idx, resp_seq);
+            return Err(ESP_ERR_INVALID_RESPONSE);
         }
         Ok(())
     }
@@ -262,7 +288,55 @@ impl SpiMaster{
         unsafe { ptr::read_unaligned(self.rx.ptr as *const Header) }
     }
 
+    /// Wait for the slave to be idle (READY LOW) before sending a new command.
+    /// After the slave finishes send_response (sets READY LOW), it needs a few
+    /// microseconds to loop back and call spi_slave_xfer. Without this wait,
+    /// the master can send a header before the slave's DMA is set up → lost data → desync.
+    #[inline]
+    fn wait_slave_idle(&self) -> Result<(), i32>{
+        // if READY is already low, slave is idle — just need DMA setup time
+        if unsafe{ gpio_get_level(PIN_READY as gpio_num_t) } == 0 {
+            unsafe{ ets_delay_us(50) };
+            return Ok(());
+        }
+        // READY is high — slave is still sending previous response, wait for it
+        Self::wait_ready_low(2000)?;
+        unsafe{ ets_delay_us(50) };
+        Ok(())
+    }
+
+    /// After an SPI error (timeout, invalid response), the slave may still be
+    /// processing the old command. Wait for it to finish, then drain any
+    /// pending response by doing a dummy transfer.
+    pub fn resync(&mut self){
+        if !self.needs_resync{
+            return;
+        }
+        log::warn!("SPI resync: waiting for slave to settle...");
+
+        // give the slave time to finish whatever it's doing (USB write can take >100ms)
+        unsafe{ vTaskDelay(200) }; // 200ms
+
+        // wait for READY to go low (slave idle state)
+        let _ = Self::wait_ready_low(500);
+
+        // if READY is still high, drain the pending response
+        if unsafe{ gpio_get_level(PIN_READY as gpio_num_t) } != 0{
+            self.tx_buf_mut()[..HDR_LEN].fill(0);
+            let _ = self.spi_xfer(FRAME_LEN);
+            unsafe{ vTaskDelay(50) };
+        }
+
+        // wait for READY to go low again
+        let _ = Self::wait_ready_low(500);
+
+        self.needs_resync = false;
+        log::warn!("SPI resync: done");
+    }
+
     pub fn cmd_frame(&mut self, cmd: Cmd, chunk_idx: u16, arg0: u32, arg1: u32, ready_timeout_ms: u32, resp_payload_len: usize) -> Result<(Header, u16), i32>{
+        self.resync();
+        self.wait_slave_idle()?;
         let seq = self.next_seq();
 
         //phase 1: REQ
@@ -279,7 +353,10 @@ impl SpiMaster{
         let t1 = unsafe { esp_timer_get_time() as i64 };
 
         //wait READY
-        Self::wait_ready(ready_timeout_ms)?;
+        if let Err(e) = Self::wait_ready(ready_timeout_ms){
+            self.needs_resync = true;
+            return Err(e);
+        }
         let t2 = unsafe { esp_timer_get_time() as i64 };
 
         //phase 2: RESP
@@ -294,12 +371,17 @@ impl SpiMaster{
         self.perf.log_if_needed();
 
         let resp: Header = unsafe{ptr::read_unaligned(self.rx.ptr as *const Header)};
-        Self::validate_resp(&resp, seq, chunk_idx)?;
+        if let Err(e) = Self::validate_resp(&resp, seq, chunk_idx){
+            self.needs_resync = true;
+            return Err(e);
+        }
 
         Ok((resp, seq))
     }
 
     pub fn write_frame(&mut self, chunk_idx: u16, lba_start: u32, nblocks_total: u32, payload: &[u8], ready_timeout_ms: u32) -> Result<(Header, u16), i32>{
+        self.resync();
+        self.wait_slave_idle()?;
         let seq = self.next_seq();
 
         if payload.len() > MAX_PAYLOAD{
@@ -317,14 +399,26 @@ impl SpiMaster{
         self.spi_xfer(HDR_LEN)?;
         let t1 = unsafe { esp_timer_get_time() as i64 };
 
-        Self::wait_ready(ready_timeout_ms)?;
+        if let Err(e) = Self::wait_ready(ready_timeout_ms){
+            self.needs_resync = true;
+            return Err(e);
+        }
         let t2 = unsafe { esp_timer_get_time() as i64 };
 
+        let crc = spi_crc32(payload);
         self.tx_buf_mut()[..payload.len()].copy_from_slice(payload);
-        self.spi_xfer(payload.len())?;
+        self.tx_buf_mut()[payload.len()..payload.len() + CRC_LEN].copy_from_slice(&crc.to_le_bytes());
+        self.spi_xfer(payload.len() + CRC_LEN)?;
         let t3 = unsafe { esp_timer_get_time() as i64 };
 
-        Self::wait_ready(ready_timeout_ms)?;
+        if let Err(e) = Self::wait_ready_low(ready_timeout_ms){
+            self.needs_resync = true;
+            return Err(e);
+        }
+        if let Err(e) = Self::wait_ready(ready_timeout_ms){
+            self.needs_resync = true;
+            return Err(e);
+        }
         let t4 = unsafe{ esp_timer_get_time() as i64 };
 
         self.tx_buf_mut()[..HDR_LEN].fill(0);
@@ -339,19 +433,25 @@ impl SpiMaster{
         self.perf.log_if_needed();
 
         let resp: Header = unsafe{ptr::read_unaligned(self.rx.ptr as *const Header)};
-        Self::validate_resp(&resp, seq, chunk_idx)?;
+        if let Err(e) = Self::validate_resp(&resp, seq, chunk_idx){
+            self.needs_resync = true;
+            return Err(e);
+        }
 
         Ok((resp, seq))
     }
 
     pub fn read_frame(&mut self, chunk_idx: u16, lba_start: u32, nblocks_total: u32, chunk_len: usize, ready_timeout_ms: u32) -> Result<(Header, u16), i32>{
-        if HDR_LEN + chunk_len > FRAME_LEN{
+        self.resync();
+        self.wait_slave_idle()?;
+        let xfer_len = HDR_LEN + chunk_len + CRC_LEN;
+        if xfer_len > FRAME_LEN{
             return Err(ESP_ERR_INVALID_SIZE);
         }
 
         let seq = self.next_seq();
 
-        self.tx_buf_mut().fill(0);
+        self.tx_buf_mut()[..xfer_len].fill(0);
 
         let mut req = Header::new(Cmd::Read, seq, lba_start, nblocks_total);
         req.reserved = chunk_idx;
@@ -364,11 +464,14 @@ impl SpiMaster{
         self.spi_xfer(HDR_LEN)?;
         let t1 = unsafe{ esp_timer_get_time() as i64 };
 
-        Self::wait_ready(ready_timeout_ms)?;
+        if let Err(e) = Self::wait_ready(ready_timeout_ms){
+            self.needs_resync = true;
+            return Err(e);
+        }
         let t2 = unsafe{ esp_timer_get_time() as i64 };
 
-        self.tx_buf_mut()[..HDR_LEN + chunk_len].fill(0);
-        self.spi_xfer(HDR_LEN + chunk_len)?;
+        self.tx_buf_mut()[..xfer_len].fill(0);
+        self.spi_xfer(xfer_len)?;
         let t3 = unsafe{ esp_timer_get_time() as i64 };
 
         self.perf.req_us += (t1 - t0) as u64;
@@ -378,7 +481,28 @@ impl SpiMaster{
         self.perf.log_if_needed();
 
         let resp: Header = unsafe{ptr::read_unaligned(self.rx.ptr as *const Header)};
-        Self::validate_resp(&resp, seq, chunk_idx)?;
+        if let Err(e) = Self::validate_resp(&resp, seq, chunk_idx){
+            self.needs_resync = true;
+            return Err(e);
+        }
+
+        // verify CRC32 on payload
+        if chunk_len > 0{
+            let payload = &self.rx_buf()[HDR_LEN..HDR_LEN + chunk_len];
+            let crc_offset = HDR_LEN + chunk_len;
+            let received_crc = u32::from_le_bytes([
+                self.rx_buf()[crc_offset],
+                self.rx_buf()[crc_offset + 1],
+                self.rx_buf()[crc_offset + 2],
+                self.rx_buf()[crc_offset + 3],
+            ]);
+            let computed_crc = spi_crc32(payload);
+            if received_crc != computed_crc{
+                log::error!("spi read_frame: CRC mismatch lba={} chunk={} received=0x{:08x} computed=0x{:08x}", lba_start, chunk_idx, received_crc, computed_crc);
+                self.needs_resync = true;
+                return Err(ESP_ERR_INVALID_CRC);
+            }
+        }
 
         Ok((resp, seq))
     }

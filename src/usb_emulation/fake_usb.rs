@@ -21,6 +21,7 @@ const BLOCK_COUNT: u32 = 4096;
 
 static ACTIVE_BS: AtomicU32 = AtomicU32::new(BLOCK_SIZE as u32);
 static ACTIVE_BC: AtomicU32 = AtomicU32::new(BLOCK_COUNT);
+static MEDIA_WAS_READY: AtomicU32 = AtomicU32::new(0);
 
 extern "C" {
     fn tud_msc_set_sense(lun: u8, sense_key: u8, asc: u8, ascq: u8);
@@ -33,6 +34,8 @@ const SCSI_ASC_LUN_NOT_READY: u8 = 0x04;
 const SCSI_ASCQ_BECOMING_READY: u8 = 0x01;
 const SCSI_SENSE_MEDIUM_ERROR: u8 = 0x03;
 const SCSI_ASC_UNRECOVERED_READ_ERROR: u8 = 0x11;
+const SCSI_SENSE_UNIT_ATTENTION: u8 = 0x06;                                                                                                                                                                                               
+const SCSI_ASC_MEDIUM_CHANGED: u8 = 0x28; 
 
 
 //asc/ascq required
@@ -131,7 +134,11 @@ pub extern "C" fn tud_msc_inquiry_cb(_lun: u8, vendor_id: *mut u8, product_id: *
     }
 }
 
-//test unit ready 
+//test unit ready
+// Once the disk has been seen as ready, transient SPI errors should NOT
+// make us report "medium not present" — that causes the OS to unmount.
+// We only report medium absent when the slave explicitly says bd_status==0
+// AND we can confirm it with a retry.
 #[no_mangle]
 pub extern "C" fn tud_msc_test_unit_ready_cb(_lun: u8) -> bool{
     let Some(spi) = get_global_spi() else{
@@ -142,8 +149,37 @@ pub extern "C" fn tud_msc_test_unit_ready_cb(_lun: u8) -> bool{
     };
 
     match spi.get_status(){
-        Ok((st, bd_status)) if st == ESP_OK && bd_status == 2 => true,
-        _ => {
+        Ok((st, bd_status)) if st == ESP_OK && bd_status == 2 => {
+            MEDIA_WAS_READY.store(1, Ordering::Relaxed);
+            true
+        }
+        Ok((st, bd_status)) if st == ESP_OK && bd_status == 0 => {
+            // confirm with a retry before declaring medium absent
+            let confirmed = match spi.get_status(){
+                Ok((s, d)) if s == ESP_OK && d == 0 => true,
+                _ => false,
+            };
+            if !confirmed{
+                // transient — if we saw ready before, just say "becoming ready"
+                if MEDIA_WAS_READY.load(Ordering::Relaxed) == 1{
+                    return true; // pretend still ready — likely SPI glitch
+                }
+                unsafe{ tud_msc_set_sense(_lun, SCSI_SENSE_NOT_READY, SCSI_ASC_LUN_NOT_READY, SCSI_ASCQ_BECOMING_READY); }
+                return false;
+            }
+            // genuinely not present (confirmed twice)
+            MEDIA_WAS_READY.store(0, Ordering::Relaxed);
+            unsafe{
+                tud_msc_set_sense(_lun, SCSI_SENSE_NOT_READY, SCSI_ASC_MEDIUM_NOT_PRESENT, SCSI_ASCQ);
+            }
+            false
+        }
+        Err(_) | Ok(_) => {
+            // SPI error (timeout, desync, etc.) — if disk was previously ready,
+            // report as ready to prevent OS from unmounting
+            if MEDIA_WAS_READY.load(Ordering::Relaxed) == 1{
+                return true;
+            }
             unsafe{
                 tud_msc_set_sense(_lun, SCSI_SENSE_NOT_READY, SCSI_ASC_LUN_NOT_READY, SCSI_ASCQ_BECOMING_READY);
             }
@@ -154,37 +190,46 @@ pub extern "C" fn tud_msc_test_unit_ready_cb(_lun: u8) -> bool{
 
 //capacity
 #[no_mangle]
-pub extern "C" fn tud_msc_capacity_cb(_lun: u8, block_count: *mut u32, block_size: *mut u16){
-    //fallback fake
-    let mut bs: u32 = BLOCK_SIZE as u32;
-    let mut bc: u32 = BLOCK_COUNT;
-
-    if let (Some(spi), Some(disk)) = (get_global_spi(), get_global_disk()){
-        if let Ok((real_bs, logical_bc)) = disk.capacity_logical(spi){
-            if real_bs != 0 && logical_bc != 0{
-                bs = real_bs;
-                bc = logical_bc;
-            }
-        }
+pub extern "C" fn tud_msc_capacity_cb(_lun: u8, block_count: *mut u32, block_size: *mut u16){                                                                                                                                           
+    let cached_bs = ACTIVE_BS.load(Ordering::Relaxed);                                                                                                                                                                                    
+    let cached_bc = ACTIVE_BC.load(Ordering::Relaxed);                                                                                                                                                  
+                                                                                                                                                                                                                                            
+    let (bs, bc) = if cached_bs != BLOCK_SIZE as u32 || cached_bc != BLOCK_COUNT{                                                                                                                                                        
+        (cached_bs, cached_bc)                                                                                                                                                                                                            
+    }
+    else if let (Some(spi), Some(disk)) = (get_global_spi(), get_global_disk()){                                                                                                                                                       
+        match disk.capacity_logical(spi) {                                                                                                                                                                                                
+            Ok((real_bs, logical_bc)) if real_bs != 0 && logical_bc != 0 => {                                                                                                                                                             
+                ACTIVE_BS.store(real_bs, Ordering::Relaxed);                                                                                                                                                                              
+                ACTIVE_BC.store(logical_bc, Ordering::Relaxed);                                                                                                                                                                           
+                (real_bs, logical_bc)                                                                                                                                                                                                     
+            }                                                                                                                                                                                                                             
+            _ => (BLOCK_SIZE as u32, BLOCK_COUNT),
+        }                                                                                                                                                                                                                                 
     }
     else if let Some(spi) = get_global_spi(){
-        if let Ok((real_bs, real_bc)) = spi.get_capacity(){
-            if real_bs != 0 && real_bc != 0{
-                bs = real_bs;
-                bc = real_bc;
-            }
+        match spi.get_capacity() {
+            Ok((real_bs, real_bc)) if real_bs != 0 && real_bc != 0 => {                                                                                                                                                                   
+                ACTIVE_BS.store(real_bs, Ordering::Relaxed);
+                ACTIVE_BC.store(real_bc, Ordering::Relaxed);                                                                                                                                                                              
+                (real_bs, real_bc)
+            }                                                                                                                                                                                                                             
+            _ => (BLOCK_SIZE as u32, BLOCK_COUNT),
         }
     }
-
-    unsafe{
+    else{
+        (BLOCK_SIZE as u32, BLOCK_COUNT)
+    };                                                                                                                                                                                                                                    
+   
+    unsafe{                                                                                                                                                                                                                               
         if !block_count.is_null(){
-            *block_count = bc;
+            *block_count = bc;                                                                                                                                                                                                            
         }
-        if !block_size.is_null(){
+        if !block_size.is_null(){                                                                                                                                                                                                         
             *block_size = bs as u16;
         }
-    }
-}
+      }
+  }
 
 //start-stop: if load_eject && !start => flush spi
 #[no_mangle]
@@ -234,14 +279,22 @@ pub extern "C" fn tud_msc_read10_cb(lun: u8, _lba: u32, offset: u32, buffer: *mu
     if let Some(disk) = get_global_disk(){
         match disk.read10(spi, _lba, nblocks, out){
             Ok(()) => bufsize as i32,
-            Err(_e) => {
-                unsafe{
-                    tud_msc_set_sense(lun, SCSI_SENSE_MEDIUM_ERROR, SCSI_ASC_UNRECOVERED_READ_ERROR, SCSI_ASCQ);
+            Err(first_err) => {
+                log::warn!("MSC read10: first attempt failed lba={} nblocks={} err={}, retrying with cache invalidation", _lba, nblocks, first_err);
+                disk.invalidate_meta_cache();
+                match disk.read10(spi, _lba, nblocks, out){
+                    Ok(()) => bufsize as i32,
+                    Err(_e) => {
+                        log::error!("MSC read10: retry failed lba={} nblocks={} err={}", _lba, nblocks, _e);
+                        unsafe{
+                            tud_msc_set_sense(lun, SCSI_SENSE_MEDIUM_ERROR, SCSI_ASC_UNRECOVERED_READ_ERROR, SCSI_ASCQ);
+                        }
+                        -1
+                    }
                 }
-                -1
             }
         }
-    }
+    } 
     else{
         match spi.read(_lba, nblocks, BLOCK_SIZE as u32, out){
             Ok(()) => bufsize as i32,
