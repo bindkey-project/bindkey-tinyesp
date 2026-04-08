@@ -3,6 +3,7 @@ use esp_idf_sys as sys;
 
 use crate::crypto::secure_element::*;
 use crate::fingerprint::*;
+use crate::fingerprint::fingerprint_r503 as r503;
 
 const UART_NUM: sys::uart_port_t = 1;
 const RX_PIN: i32 = 1;
@@ -85,7 +86,11 @@ fn handle_enroll() {
                 Err(rc) => log::error!("Enroll error rc={}", rc)
             }
             log::info!("hello");*/
-            let _ = enroll_once();
+            if crate::USE_R503 == 1 {
+                let _ = r503::enroll_once();
+            } else {
+                let _ = enroll_once();
+            }
 
             let mut hexbuf = [0u8; 256];
 
@@ -133,7 +138,12 @@ fn handle_challenge_hex(hex: &str) {
     };
 
     // fingerprint + signature
-    match test_fingerprint_once() {
+    let fp_result = if crate::USE_R503 == 1 {
+        r503::test_fingerprint_once()
+    } else {
+        test_fingerprint_once()
+    };
+    match fp_result {
         Ok(()) => {
             match (|| -> Result<[u8; 64], i32> {
                 let se = AteccSession::new()?;

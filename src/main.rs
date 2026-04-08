@@ -17,6 +17,13 @@ use crate::crypto::aes::*;
 use crate::crypto::encrypted_disk::{EncryptedDisk, set_global_disk};
 use crate::software_link::*;
 
+// ======================================================================
+// Fingerprint sensor selection flag
+// 0 = BM-Lite (FPC, SPI2)
+// 1 = R503 (Grow, UART2)
+// ======================================================================
+const USE_R503: u8 = 1;
+
 fn main() {
     // Obligatoire pour esp-idf-sys
     link_patches();
@@ -25,29 +32,65 @@ fn main() {
     EspLogger::initialize_default();
 
     log::info!("Fingerprint authentication required...");
-    /*match fingerprint_validation(){
-        Ok(()) => log::info!("Fingerprint authenticated !"),
-        Err(e) => {
-            log::error!("Fingerprint error : {}", e);
-            return;
-        }
-    }*/
-    match fingerprint::init(){
-        Ok(()) => log::info!("Fingerprint init ok"),
-        Err(e) => {
-            log::error!("Fingerprint error : {}", e);
-            return;
-        }
-    }
 
-    //let _ = fingerprint::wipe_templates();
-    //let _ = fingerprint::enroll_user();
-
-    match test_fingerprint_once(){
-        Ok(()) => log::info!("Fingerprint authenticated !"),
-        Err(e) => {
-            log::error!("Fingerprint error : {}", e);
-            return;
+    if USE_R503 == 1 {
+        // ---------- R503 path ----------
+        use crate::fingerprint::fingerprint_r503 as r503;
+        match r503::init() {
+            Ok(()) => log::info!("R503 init ok"),
+            Err(e) => {
+                log::error!("R503 error: {}", e);
+                return;
+            }
+        }
+        // Skip auth if no template enrolled (enroll via UART "enroll" command first)
+        match r503::is_user_enrolled() {
+            Ok(true) => {
+                match r503::test_fingerprint_once() {
+                    Ok(()) => log::info!("R503 authenticated!"),
+                    Err(e) => {
+                        log::error!("R503 error: {}", e);
+                        return;
+                    }
+                }
+            }
+            Ok(false) => {
+                log::warn!("R503: no template enrolled, skipping auth (use 'enroll' command)");
+                // No auth needed — green = unlocked
+                let _ = r503::led_on(r503::LedColor::Green);
+            }
+            Err(e) => {
+                log::error!("R503 is_user_enrolled error: {}", e);
+                return;
+            }
+        }
+    } else {
+        // ---------- BM-Lite path ----------
+        match fingerprint::init(){
+            Ok(()) => log::info!("Fingerprint init ok"),
+            Err(e) => {
+                log::error!("Fingerprint error : {}", e);
+                return;
+            }
+        }
+        // Skip auth if no template enrolled
+        match fingerprint::is_user_enrolled() {
+            Ok(true) => {
+                match test_fingerprint_once(){
+                    Ok(()) => log::info!("Fingerprint authenticated !"),
+                    Err(e) => {
+                        log::error!("Fingerprint error : {}", e);
+                        return;
+                    }
+                }
+            }
+            Ok(false) => {
+                log::warn!("BM-Lite: no template enrolled, skipping auth (use 'enroll' command)");
+            }
+            Err(e) => {
+                log::error!("BM-Lite is_user_enrolled error: {}", e);
+                return;
+            }
         }
     }
     
@@ -157,6 +200,15 @@ fn main() {
     }
 
     log::info!("Fake MSC ready. Plug USB to host.");
+
+    // Diagnostic: vérifier que le R503 répond toujours après toutes les inits
+    if USE_R503 == 1 {
+        use crate::fingerprint::fingerprint_r503 as r503;
+        match r503::handshake() {
+            Ok(()) => log::info!("R503 diagnostic: still alive after all inits"),
+            Err(e) => log::error!("R503 diagnostic: DEAD after all inits: {}", e),
+        }
+    }
 
     // IMPORTANT: ne jamais sortir de main
     loop {
