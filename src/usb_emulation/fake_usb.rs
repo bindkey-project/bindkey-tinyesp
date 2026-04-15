@@ -2,18 +2,19 @@
 #![allow(non_snake_case)]
 #![allow(dead_code)]
 
-use core::{mem, ptr};
+use core::ptr;
 use esp_idf_sys::esp_tinyusb::{
     tinyusb_config_t, tinyusb_desc_config_t, tinyusb_phy_config_t, tinyusb_task_config_t,
     tinyusb_driver_install, tinyusb_port_t_TINYUSB_PORT_FULL_SPEED_0,
     tusb_desc_device_t, tusb_desc_device_qualifier_t,
 };
 use esp_idf_sys::*;
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use crate::spi_link::api_spi::get_global_spi;
 
 use crate::crypto::encrypted_disk::get_global_disk;
+use crate::crypto::volume_table::{get_global_bk_table, is_bk_table_dirty, clear_bk_table_dirty};
 
 //fake disk parameters, 4096 blocs = 2MiB => ok for the os to see a disk and mount/format it
 const BLOCK_SIZE: u16 = 512;
@@ -22,6 +23,53 @@ const BLOCK_COUNT: u32 = 4096;
 static ACTIVE_BS: AtomicU32 = AtomicU32::new(BLOCK_SIZE as u32);
 static ACTIVE_BC: AtomicU32 = AtomicU32::new(BLOCK_COUNT);
 static MEDIA_WAS_READY: AtomicU32 = AtomicU32::new(0);
+static DISK_LOGGED: AtomicU32 = AtomicU32::new(0);
+/// Set to 1 once we log "hiding disk — no volumes configured" to avoid log spam.
+/// Reset to 0 when volumes become available so the "first Ready" log fires again.
+static GATE_LOGGED: AtomicU32 = AtomicU32::new(0);
+/// Set to true by reset_disk_state(). Consumed in TUR once the gate lifts (volumes ready):
+/// signals UNIT_ATTENTION MEDIUM_CHANGED so the OS discards its cached disk state.
+static NEEDS_UNIT_ATTENTION: AtomicBool = AtomicBool::new(false);
+
+/// Set to true by enter_format_mode() (action=init_format UART command).
+/// While true, the gate that hides the disk when num_volumes==0 is bypassed,
+/// so the OS can still write the msdos partition table via force_format.
+/// Cleared by exit_format_mode() once the first volume is created.
+static DISK_FORMATTING: AtomicBool = AtomicBool::new(false);
+
+/// Called by UART task on `action=init_format` so the OS sees the disk as a new medium
+/// when volumes are re-configured, instead of the old stale state.
+pub fn reset_disk_state() {
+    MEDIA_WAS_READY.store(0, Ordering::Relaxed);
+    DISK_LOGGED.store(0, Ordering::Relaxed);
+    GATE_LOGGED.store(0, Ordering::Relaxed);
+    NEEDS_UNIT_ATTENTION.store(true, Ordering::Relaxed);
+    log::info!("disk state reset: disk hidden until volumes re-configured via UART");
+}
+
+/// Called by UART task on `action=init_format`.
+/// Bypasses the num_volumes==0 gate so the OS can still write the msdos partition table
+/// via force_format while volumes are being reconfigured via UART.
+/// The disk remains visible to the OS during the format session.
+pub fn enter_format_mode() {
+    DISK_FORMATTING.store(true, Ordering::Relaxed);
+    GATE_LOGGED.store(0, Ordering::Relaxed);
+    log::info!("enter_format_mode: gate bypassed, disk stays visible for force_format");
+}
+
+/// Called after the first volume is successfully created during a format session.
+/// Clears the format bypass — no UNIT_ATTENTION here because mkfs.vfat is still
+/// running at this point; partprobe+udevadm settle (called by the software) are
+/// sufficient for the OS to discover the new partition.
+pub fn exit_format_mode() {
+    DISK_FORMATTING.store(false, Ordering::Relaxed);
+    DISK_LOGGED.store(0, Ordering::Relaxed);
+    log::info!("exit_format_mode: gate re-enabled");
+}
+
+pub fn is_disk_formatting() -> bool {
+    DISK_FORMATTING.load(Ordering::Relaxed)
+}
 
 extern "C" {
     fn tud_msc_set_sense(lun: u8, sense_key: u8, asc: u8, ascq: u8);
@@ -150,7 +198,61 @@ pub extern "C" fn tud_msc_test_unit_ready_cb(_lun: u8) -> bool{
 
     match spi.get_status(){
         Ok((st, bd_status)) if st == ESP_OK && bd_status == 2 => {
+            // Flush BK Table first (deferred from UART task).
+            // Must run even when we're about to gate the disk hidden, so that
+            // action=init_format (num_volumes=0) is persisted before a reboot.
+            if is_bk_table_dirty() {
+                if let Some(table) = get_global_bk_table() {
+                    let mut buf = [0u8; 512];
+                    table.encode(&mut buf);
+                    match spi.write(0, 1, 512, &buf) {
+                        Ok(()) => {
+                            clear_bk_table_dirty();
+                            log::info!("BK Table flushed to disk");
+                        }
+                        Err(e) => log::error!("BK Table flush failed: {}", e)
+                    }
+                }
+            }
+
+            // Gate: if the BK Table was explicitly initialized (valid magic on disk)
+            // but has no volumes, the user ran action=init_format and hasn't configured
+            // volumes yet — keep the disk hidden from the OS until UART completes the setup.
+            // This prevents the OS from formatting with the wrong/missing key.
+            //
+            // Exception: while DISK_FORMATTING is set (active format session started by
+            // action=init_format), the gate is bypassed so the OS can still write the msdos
+            // partition table via force_format before volumes are declared.
+            if let Some(table) = get_global_bk_table() {
+                if table.initialized && table.num_volumes == 0
+                    && !DISK_FORMATTING.load(Ordering::Relaxed)
+                {
+                    if GATE_LOGGED.swap(1, Ordering::Relaxed) == 0 {
+                        log::warn!("TUR: BkTable wiped (0 volumes) — hiding disk from OS. \
+                                    Send volume_name/volume_id/lba_start/lba_end via UART first.");
+                    }
+                    unsafe { tud_msc_set_sense(_lun, SCSI_SENSE_NOT_READY, SCSI_ASC_LUN_NOT_READY, SCSI_ASCQ_BECOMING_READY); }
+                    return false;
+                }
+            }
+            // Volumes exist (or first boot with no BK Table yet) — disk is visible.
+            GATE_LOGGED.store(0, Ordering::Relaxed);
+
+            // Signal UNIT_ATTENTION MEDIUM_CHANGED once after init_format+volume_create:
+            // forces the OS to discard any cached disk state and re-read the partition table.
+            if NEEDS_UNIT_ATTENTION.swap(false, Ordering::Relaxed) {
+                log::info!("TUR: signaling UNIT_ATTENTION MEDIUM_CHANGED to OS");
+                unsafe { tud_msc_set_sense(_lun, SCSI_SENSE_UNIT_ATTENTION, SCSI_ASC_MEDIUM_CHANGED, SCSI_ASCQ); }
+                return false;
+            }
+
             MEDIA_WAS_READY.store(1, Ordering::Relaxed);
+            if DISK_LOGGED.swap(1, Ordering::Relaxed) == 0 {
+                log::info!("TUR: first Ready — disk now visible to OS");
+                if let Some(disk) = get_global_disk(){
+                    disk.log_volume_table();
+                }
+            }
             true
         }
         Ok((st, bd_status)) if st == ESP_OK && bd_status == 0 => {
@@ -169,9 +271,17 @@ pub extern "C" fn tud_msc_test_unit_ready_cb(_lun: u8) -> bool{
             }
             // genuinely not present (confirmed twice)
             MEDIA_WAS_READY.store(0, Ordering::Relaxed);
+            
             unsafe{
                 tud_msc_set_sense(_lun, SCSI_SENSE_NOT_READY, SCSI_ASC_MEDIUM_NOT_PRESENT, SCSI_ASCQ);
             }
+            false
+        }
+        Ok((st, bd_status)) if st == ESP_OK && bd_status == 1 => {
+            // slave NotReady (drive reconnecting, block_count=0) — legitimate transient state,
+            // NOT a SPI error: never pretend ready here or reads will immediately fail
+            log::info!("TUR: slave NotReady (bd=1) → BECOMING_READY");
+            unsafe { tud_msc_set_sense(_lun, SCSI_SENSE_NOT_READY, SCSI_ASC_LUN_NOT_READY, SCSI_ASCQ_BECOMING_READY); }
             false
         }
         Err(_) | Ok(_) => {
@@ -221,20 +331,22 @@ pub extern "C" fn tud_msc_capacity_cb(_lun: u8, block_count: *mut u32, block_siz
         (BLOCK_SIZE as u32, BLOCK_COUNT)
     };                                                                                                                                                                                                                                    
    
-    unsafe{                                                                                                                                                                                                                               
+    //log::info!("CAPACITY: bs={} bc={}", bs, bc);
+    unsafe{
         if !block_count.is_null(){
-            *block_count = bc;                                                                                                                                                                                                            
+            *block_count = bc;
         }
-        if !block_size.is_null(){                                                                                                                                                                                                         
+        if !block_size.is_null(){
             *block_size = bs as u16;
         }
-      }
-  }
+    }
+}
 
 //start-stop: if load_eject && !start => flush spi
 #[no_mangle]
 pub extern "C" fn tud_msc_start_stop_cb(_lun: u8, _power_condition: u8, _start: bool, _load_eject: bool) -> bool{
     if _load_eject && !_start{
+        DISK_LOGGED.store(0, Ordering::Relaxed);
         if let (Some(spi), Some(disk)) = (get_global_spi(), get_global_disk()){
             let _ = disk.flush_all(spi);
         }
@@ -270,7 +382,7 @@ pub extern "C" fn tud_msc_read10_cb(lun: u8, _lba: u32, offset: u32, buffer: *mu
     };
 
     let nblocks = (bufsize as u32) / (BLOCK_SIZE as u32);
-    //log::info!("MSC_CB: READ10 lun={} lba={} nblocks={} bufsize={} offset={}", lun, _lba, nblocks, bufsize, offset);
+    //log::info!("READ10 lba={} nblocks={}", _lba, nblocks);
 
     let out = unsafe{
         core::slice::from_raw_parts_mut(buffer as *mut u8, bufsize as usize)
@@ -335,7 +447,7 @@ pub extern "C" fn tud_msc_write10_cb(lun: u8, _lba: u32, offset: u32, _buffer: *
     };
 
     let nblocks = (bufsize as u32) / (BLOCK_SIZE as u32);
-    //log::info!("MSC_CB: WRITE10 lun={} lba={} nblocks={} bufsize={} offset={}", lun, _lba, nblocks, bufsize, offset);
+    log::info!("WRITE10 lba={} nblocks={}", _lba, nblocks);
 
     let data = unsafe{
         core::slice::from_raw_parts(_buffer as *const u8, bufsize as usize)
@@ -343,8 +455,12 @@ pub extern "C" fn tud_msc_write10_cb(lun: u8, _lba: u32, offset: u32, _buffer: *
 
     if let Some(disk) = get_global_disk(){
         match disk.write10(spi, _lba, nblocks, data){
-            Ok(()) => bufsize as i32,
+            Ok(()) => {
+                log::info!("WRITE10 OK lba={} nblocks={}", _lba, nblocks);
+                bufsize as i32
+            }
             Err(_e) => {
+                log::error!("WRITE10 FAILED lba={} nblocks={} err={}", _lba, nblocks, _e);
                 unsafe{
                     tud_msc_set_sense(lun, SCSI_SENSE_MEDIUM_ERROR, SCSI_ASC_UNRECOVERED_READ_ERROR, SCSI_ASCQ);
                 }
@@ -356,6 +472,7 @@ pub extern "C" fn tud_msc_write10_cb(lun: u8, _lba: u32, offset: u32, _buffer: *
         match spi.write(_lba, nblocks, BLOCK_SIZE as u32, data){
             Ok(()) => bufsize as i32,
             Err(_e) => {
+                log::error!("WRITE10 (no-disk) FAILED lba={} nblocks={} err={}", _lba, nblocks, _e);
                 unsafe{
                     tud_msc_set_sense(lun, SCSI_SENSE_NOT_READY, SCSI_ASC_LUN_NOT_READY, SCSI_ASCQ_BECOMING_READY);
                 }

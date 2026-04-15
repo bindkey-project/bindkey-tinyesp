@@ -8,6 +8,7 @@ mod crypto;
 mod fingerprint;
 mod software_link;
 
+use crate::crypto::{BkTable, set_global_bk_table};
 use crate::usb_emulation::fake_usb::*;
 use crate::spi_link::spi_master::SpiMaster;
 use crate::spi_link::api_spi::set_global_spi;
@@ -120,8 +121,31 @@ fn main() {
     }
 
     set_global_spi(&mut spi);
+
+    let mut bk_buf = [0u8; 512];
+    // Retry : le slave SPI peut prendre quelques secondes à démarrer après le boot
+    let bk_table = {
+        let mut table = BkTable::new();
+        for attempt in 0..5u32 {
+            match spi.read(0, 1, 512, &mut bk_buf) {
+                Ok(()) => {
+                    table = BkTable::decode_or_default(&bk_buf);
+                    log::info!("BK Table: {} volume(s), attempt {}", table.num_volumes, attempt);
+                    break;
+                }
+                Err(e) => {
+                    log::warn!("BK Table read attempt {} failed err={}, retrying...", attempt, e);
+                    if attempt < 4 {
+                        std::thread::sleep(std::time::Duration::from_secs(1));
+                    }
+                }
+            }
+        }
+        table
+    };
     
-    let (gpt_key, vol_key) = match(|| -> Result<([u8; 32], [u8; 32]), i32>{
+    // bloc qui servait avant le partage de volumes
+    /*let (gpt_key, vol_key) = match(|| -> Result<([u8; 32], [u8; 32]), i32>{
         let se = AteccSession::new()?;
         let gpt_key = derive_volume_key_hmac(&se, 9, GPT_VOLUME_ID)?;
         let vol_id: [u8; 16] = *b"bindkey-vol-0001";
@@ -139,7 +163,22 @@ fn main() {
             return;
         }
     };
-    let _gpt_key = gpt_key;
+    let _gpt_key = gpt_key;*/
+
+    let vol_key = match(|| -> Result<[u8; 32], i32>{
+        let se = AteccSession::new()?;
+        let vol_id: [u8; 16] = *b"bindkey-vol-0001";
+        derive_volume_key_hmac(&se, 9, vol_id)
+    })(){
+        Ok(k) => {
+            log::info!("default vol_key[0..4] = {:02X?}", &k[..4]);
+            k
+        },
+        Err(err) => {
+            log::error!("derive_volume_key failed {}", err);
+            return;
+        }
+    };
 
     let mut disk_box: Box<EncryptedDisk> = match EncryptedDisk::new(&vol_key){
         Ok(d) => Box::new(d),
@@ -157,6 +196,32 @@ fn main() {
     set_global_disk(disk_ref);
     log::info!("EncryptedDisk initialized (heap)");
 
+    // BK Table en RAM globale (leak sur le heap — lifetime 'static)
+    let bk_table_ref: &'static mut BkTable = Box::leak(Box::new(bk_table));
+    set_global_bk_table(bk_table_ref);
+
+    if bk_table_ref.num_volumes > 0{
+        match AteccSession::new(){
+            Ok(se) => {
+                for i in 0..bk_table_ref.num_volumes as usize{
+                    let entry = &bk_table_ref.entries[i];
+                    log::info!("restore vol {} volume_id={:02X?}", i, &entry.volume_id);
+                    match derive_volume_key_hmac(&se, 9, entry.volume_id){
+                        Ok(key) => {
+                            log::info!("restore vol {} key[0..4] = {:02X?}", i, &key[..4]);
+                            match disk_ref.add_volume(entry.lba_start, entry.lba_end, &key){
+                                Ok(()) => log::info!("volume {} restaure lba={}..{}", i, entry.lba_start, entry.lba_end),
+                                Err(e) => log::error!("add_volume {} failed: {}", i, e)
+                            }
+                        },
+                        Err(e) => log::error!("derive key volume {} failed: {}", i, e)
+                    }
+                }
+            }
+            Err(e) => log::error!("AteccSession restauration failed: {}", e)
+        }
+    }
+
     unsafe{
         let err = init_fake_usb_msc();
         if err != ESP_OK {
@@ -169,7 +234,7 @@ fn main() {
         }
     }
 
-    match test_secure_element(){
+    /*match test_secure_element(){
         Ok(()) => log::info!("Secure Element ok"),
         Err(e) => log::error!("Secure Element failed : {}", e)
     }
@@ -182,7 +247,7 @@ fn main() {
     match test_aes_gcm_with_se(9) {
         Ok(()) => log::info!("AES-GCM(SE) ok"),
         Err(rc) => log::error!("AES-GCM(SE) failed rc={}", rc),
-    }
+    }*/
 
     /*match test_fingerprint(){
         Ok(()) => log::info!("Ok"),
