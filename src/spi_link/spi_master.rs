@@ -115,6 +115,15 @@ impl SpiMaster{
     //called once at boot
     pub fn init(&mut self) -> Result<(), i32>{
         unsafe{
+            // GPIO13 drive test — remove after diagnosis
+            /*gpio_reset_pin(PIN_MOSI as gpio_num_t);
+            gpio_set_direction(PIN_MOSI as gpio_num_t, gpio_mode_t_GPIO_MODE_OUTPUT);
+            gpio_set_level(PIN_MOSI as gpio_num_t, 1);
+            log::info!("GPIO13 drive test: HIGH for 5s");
+            vTaskDelay(5000);
+            gpio_set_level(PIN_MOSI as gpio_num_t, 0);
+            log::info!("GPIO13 drive test: done");*/
+
             // READY pin
             gpio_reset_pin(PIN_READY as gpio_num_t);
             gpio_set_direction(PIN_READY as gpio_num_t, gpio_mode_t_GPIO_MODE_INPUT);
@@ -136,7 +145,9 @@ impl SpiMaster{
 
             let dma: spi_dma_chan_t = spi_common_dma_t_SPI_DMA_CH_AUTO as spi_dma_chan_t;
 
-            let err = spi_bus_initialize(spi_host_device_t_SPI3_HOST, &buscfg, dma);
+            // attention si on remet le bmlite à changer !
+            let err = spi_bus_initialize(spi_host_device_t_SPI2_HOST, &buscfg, dma);
+            //log::info!("spi_bus_initialize ret={}", err);
             if err != ESP_OK{
                 return Err(err);
             }
@@ -149,7 +160,7 @@ impl SpiMaster{
             devcfg.queue_size = 1;
 
             let mut dev: spi_device_handle_t = ptr::null_mut();
-            let err = spi_bus_add_device(spi_host_device_t_SPI3_HOST, &devcfg, &mut dev);
+            let err = spi_bus_add_device(spi_host_device_t_SPI2_HOST, &devcfg, &mut dev);
             if err != ESP_OK{
                 return Err(err);
             }
@@ -348,6 +359,7 @@ impl SpiMaster{
         let req_bytes = unsafe{slice::from_raw_parts((&req as *const Header) as *const u8, HDR_LEN)};
         self.tx_buf_mut()[..HDR_LEN].copy_from_slice(req_bytes);
 
+        //log::info!("tx hdr: {:02x} {:02x} {:02x}", self.tx.as_ref()[0], self.tx.as_ref()[1], self.tx.as_ref()[2]);
         let t0 = unsafe { esp_timer_get_time() as i64 };
         self.spi_xfer(HDR_LEN)?;
         let t1 = unsafe { esp_timer_get_time() as i64 };

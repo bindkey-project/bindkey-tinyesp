@@ -4,7 +4,28 @@ use core::ffi::c_int;
 pub const ATCA_SUCCESS: i32 = 0;
 
 //zones/lock zones (CryptoAuthLib)
-pub const ATCA_ZONE_DATA: u8 = 0x02;
+pub const ATCA_ZONE_CONFIG: u8 = 0x00;
+pub const ATCA_ZONE_DATA: u8   = 0x02;
+
+// SlotConfig (2 bytes par slot, little-endian)
+// Low byte  : [IsSecret(7)][EncryptRead(6)][LimitedUse(5)][NoMac(4)][ReadKey(3:0)]
+// High byte : [WriteConfig(7:4)][WriteKey(3:0)]
+// WriteConfig : 0x0=Always (écrasable même après data lock), 0x2=Never (protégé après data lock)
+const SC_ECC_PRIV: [u8; 2] = [0x80, 0x20]; // IsSecret, WriteConfig=Never
+const SC_CERT:     [u8; 2] = [0x00, 0x20]; // Public (cert lisible), WriteConfig=Never
+const SC_HMAC:     [u8; 2] = [0x80, 0x20]; // IsSecret, WriteConfig=Never
+const SC_AES_KEY:  [u8; 2] = [0x00, 0x00]; // Readable, WriteConfig=Always (révocable)
+const SC_DISABLED: [u8; 2] = [0x80, 0x20]; // IsSecret, WriteConfig=Never
+
+// KeyConfig (2 bytes par slot, little-endian)
+// Low byte  : [ReqAuth(7)][ReqRandom(6)][Lockable(5)][KeyType(4:2)][PubInfo(1)][Private(0)]
+// High byte : [X509id(7:5)][IntrusionDisable(4)][AuthKey(3:0)]
+// KeyType : 4=P256 ECC, 6=AES-128, 7=SHA/HMAC
+const KC_P256:     [u8; 2] = [0x33, 0x00]; // Private=1, PubInfo=1, KeyType=P256(4), Lockable=1
+const KC_AES:      [u8; 2] = [0x18, 0x00]; // KeyType=AES(6)
+const KC_HMAC:     [u8; 2] = [0x1C, 0x00]; // KeyType=SHA/HMAC(7)
+const KC_DATA:     [u8; 2] = [0x00, 0x00]; // Stockage pur (slot cert, pas une clef)
+const KC_DISABLED: [u8; 2] = [0x1C, 0x00]; // SHA/HMAC, non private, non lockable
 
 //is_locked zones (CryptoAuthLib: 0=config, 1=data)
 pub const LOCK_ZONE_CONFIG: u8 = 0;
@@ -196,6 +217,20 @@ impl AteccSession{
         Ok(())
     }
 
+    // TODO: ajouter read_aes_key(slot: u16) -> Result<[u8; 32], i32>
+    //   Lire en clair une clef AES partagée depuis les slots 10-14 (IsSecret=0, readable).
+    //   Utiliser atcab_read_bytes_zone(ATCA_ZONE_DATA, slot, 0, buf, 32).
+    //   Appelé au boot pour charger les clefs des volumes partagés reçus du serveur.
+    //   La clef doit être consommée immédiatement et non gardée dans un global.
+
+    // TODO: ajouter la logique certificat (slot 8, atcacert)
+    //   - Binder atcacert_write_cert() et atcacert_read_cert() depuis cryptoauthlib
+    //   - Définir le template atcacert_def_t en flash (issuer=CA BindKey, subject=SN device)
+    //   - write_device_cert(sig_compressed: &[u8]) : écriture de la signature dans slot 8
+    //     après que le serveur CA a signé la pubkey slot 0 (flow provisioning UART)
+    //   - read_device_cert() -> DER : reconstruction du X.509 complet pour auth serveur
+    //   - X509id dans KC_DATA (slot 8) à mettre à jour pour matcher le template (0=désactivé pour l'instant)
+
     pub fn sha_hmac(&self, key_slot: u16, msg: &[u8]) -> Result<[u8; 32], i32>{
         let mut out = [0u8; 32];
         unsafe{
@@ -292,6 +327,116 @@ pub fn test_hmac_volume_derivation(root_slot: u16) -> Result<(), i32>{
     log::info!("stability check A: {}", k_a1 == k_a2);
     log::info!("difference check A vs B: {}", k_a1 != k_b);
 
+    Ok(())
+}
+
+/// Configure la config zone de l'ATECC608 et la verrouille.
+/// Idempotente : ne fait rien si la config zone est déjà lockée.
+///
+/// Layout des slots :
+///   0        : ECC P256 private key (identité device)
+///   1        : ECC P256 réservé
+///   2–7      : désactivés
+///   8        : device certificate compressé (416 bytes, public)
+///   9        : root HMAC secret (dérive les clefs volumes)
+///   10–14    : AES keys partage volumes (WriteConfig=Always → révocables)
+///   15       : désactivé
+pub fn provision_config_zone(se: &AteccSession) -> Result<(), i32> {
+    let (cfg_locked, _) = se.lock_status()?;
+    if cfg_locked {
+        log::info!("SE: config zone already locked, skip");
+        return Ok(());
+    }
+
+    // SlotConfig : bytes 20-51 de la config zone (2 bytes × 16 slots)
+    #[rustfmt::skip]
+    let slot_configs: [u8; 32] = [
+        SC_ECC_PRIV[0],  SC_ECC_PRIV[1],  // slot  0 : ECC P256 private key
+        SC_ECC_PRIV[0],  SC_ECC_PRIV[1],  // slot  1 : ECC P256 réservé
+        SC_DISABLED[0],  SC_DISABLED[1],  // slot  2 : désactivé
+        SC_DISABLED[0],  SC_DISABLED[1],  // slot  3 : désactivé
+        SC_DISABLED[0],  SC_DISABLED[1],  // slot  4 : désactivé
+        SC_DISABLED[0],  SC_DISABLED[1],  // slot  5 : désactivé
+        SC_DISABLED[0],  SC_DISABLED[1],  // slot  6 : désactivé
+        SC_DISABLED[0],  SC_DISABLED[1],  // slot  7 : désactivé
+        SC_CERT[0],      SC_CERT[1],      // slot  8 : device certificate
+        SC_HMAC[0],      SC_HMAC[1],      // slot  9 : HMAC root secret
+        SC_AES_KEY[0],   SC_AES_KEY[1],   // slot 10 : AES vol partagé
+        SC_AES_KEY[0],   SC_AES_KEY[1],   // slot 11 : AES vol partagé
+        SC_AES_KEY[0],   SC_AES_KEY[1],   // slot 12 : AES vol partagé
+        SC_AES_KEY[0],   SC_AES_KEY[1],   // slot 13 : AES vol partagé
+        SC_AES_KEY[0],   SC_AES_KEY[1],   // slot 14 : AES vol partagé
+        SC_DISABLED[0],  SC_DISABLED[1],  // slot 15 : désactivé
+    ];
+
+    // KeyConfig : bytes 96-127 de la config zone (2 bytes × 16 slots)
+    #[rustfmt::skip]
+    let key_configs: [u8; 32] = [
+        KC_P256[0],     KC_P256[1],     // slot  0 : P256 ECC
+        KC_P256[0],     KC_P256[1],     // slot  1 : P256 ECC réservé
+        KC_DISABLED[0], KC_DISABLED[1], // slot  2 : désactivé
+        KC_DISABLED[0], KC_DISABLED[1], // slot  3 : désactivé
+        KC_DISABLED[0], KC_DISABLED[1], // slot  4 : désactivé
+        KC_DISABLED[0], KC_DISABLED[1], // slot  5 : désactivé
+        KC_DISABLED[0], KC_DISABLED[1], // slot  6 : désactivé
+        KC_DISABLED[0], KC_DISABLED[1], // slot  7 : désactivé
+        KC_DATA[0],     KC_DATA[1],     // slot  8 : stockage cert
+        KC_HMAC[0],     KC_HMAC[1],     // slot  9 : HMAC root
+        KC_AES[0],      KC_AES[1],      // slot 10 : AES key
+        KC_AES[0],      KC_AES[1],      // slot 11 : AES key
+        KC_AES[0],      KC_AES[1],      // slot 12 : AES key
+        KC_AES[0],      KC_AES[1],      // slot 13 : AES key
+        KC_AES[0],      KC_AES[1],      // slot 14 : AES key
+        KC_DISABLED[0], KC_DISABLED[1], // slot 15 : désactivé
+    ];
+
+    unsafe {
+        // SlotConfig → bytes 20-51 de la config zone
+        let rc = atcab_write_bytes_zone(
+            ATCA_ZONE_CONFIG, 0, 20,
+            slot_configs.as_ptr(), slot_configs.len(),
+        );
+        if rc != ATCA_SUCCESS {
+            log::error!("SE: write SlotConfig failed rc={}", rc);
+            return Err(rc);
+        }
+
+        // KeyConfig → bytes 96-127 de la config zone
+        let rc = atcab_write_bytes_zone(
+            ATCA_ZONE_CONFIG, 0, 96,
+            key_configs.as_ptr(), key_configs.len(),
+        );
+        if rc != ATCA_SUCCESS {
+            log::error!("SE: write KeyConfig failed rc={}", rc);
+            return Err(rc);
+        }
+    }
+
+    log::info!("SE: SlotConfig + KeyConfig written");
+
+    // Verrouillage config zone (irréversible — lock_config_zone() vérifie déjà l'état)
+    se.lock_config_zone()?;
+    log::info!("SE: config zone provisioned and locked");
+
+    // Génération de la paire ECC identité dans slot 0.
+    // get_pubkey() permet de détecter si une clef existe déjà (data zone non lockée).
+    // Si ça échoue on génère — sur un chip neuf c'est toujours le cas.
+    match se.get_pubkey(0) {
+        Ok(pk) => log::info!("SE: slot 0 ECC already present pubkey[0..4]={:02X?}", &pk[..4]),
+        Err(_) => {
+            let pk = se.gen_ecc_keypair(0)?;
+            log::info!("SE: slot 0 ECC keypair generated pubkey[0..4]={:02X?}", &pk[..4]);
+        }
+    }
+
+    // Écriture du root HMAC secret dans slot 9 (aléa via atcab_random).
+    // CRITIQUE : ce secret dérive TOUTES les clefs volumes via HMAC-SHA256.
+    // Il ne peut pas être lu (IsSecret=1) — il est irrécouvrable si perdu.
+    // On l'écrit une seule fois ici, protégé par le guard cfg_locked en tête de fonction.
+    se.provision_root_secret_dev(9)?;
+    log::info!("SE: slot 9 root HMAC secret written");
+
+    log::info!("SE: provisioning complete — device ready");
     Ok(())
 }
 

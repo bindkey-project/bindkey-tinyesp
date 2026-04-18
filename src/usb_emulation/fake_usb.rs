@@ -447,7 +447,7 @@ pub extern "C" fn tud_msc_write10_cb(lun: u8, _lba: u32, offset: u32, _buffer: *
     };
 
     let nblocks = (bufsize as u32) / (BLOCK_SIZE as u32);
-    log::info!("WRITE10 lba={} nblocks={}", _lba, nblocks);
+    //log::info!("WRITE10 lba={} nblocks={}", _lba, nblocks);
 
     let data = unsafe{
         core::slice::from_raw_parts(_buffer as *const u8, bufsize as usize)
@@ -456,7 +456,7 @@ pub extern "C" fn tud_msc_write10_cb(lun: u8, _lba: u32, offset: u32, _buffer: *
     if let Some(disk) = get_global_disk(){
         match disk.write10(spi, _lba, nblocks, data){
             Ok(()) => {
-                log::info!("WRITE10 OK lba={} nblocks={}", _lba, nblocks);
+                //log::info!("WRITE10 OK lba={} nblocks={}", _lba, nblocks);
                 bufsize as i32
             }
             Err(_e) => {

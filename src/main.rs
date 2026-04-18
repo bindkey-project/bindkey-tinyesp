@@ -7,6 +7,7 @@ mod spi_link;
 mod crypto;
 mod fingerprint;
 mod software_link;
+mod led;
 
 use crate::crypto::{BkTable, set_global_bk_table};
 use crate::usb_emulation::fake_usb::*;
@@ -17,10 +18,11 @@ use crate::crypto::secure_element::*;
 use crate::crypto::aes::*;
 use crate::crypto::encrypted_disk::{EncryptedDisk, set_global_disk};
 use crate::software_link::*;
+use crate::led::*;
 
 // ======================================================================
 // Fingerprint sensor selection flag
-// 0 = BM-Lite (FPC, SPI2)
+// 0 = BM-Lite (FPC, SPI2) // attention si on remet le bmlite à changer spi3 -> spi2!
 // 1 = R503 (Grow, UART2)
 // ======================================================================
 const USE_R503: u8 = 1;
@@ -31,6 +33,8 @@ fn main() {
 
     // Logs ESP
     EspLogger::initialize_default();
+
+    let _led = LedGuard::new();
 
     log::info!("Fingerprint authentication required...");
 
@@ -164,6 +168,19 @@ fn main() {
         }
     };
     let _gpt_key = gpt_key;*/
+
+    match AteccSession::new() {
+        Ok(se) => {
+            if let Err(err) = provision_config_zone(&se) {
+                log::error!("SE provision_config_zone failed rc={}", err);
+                return;
+            }
+        }
+        Err(err) => {
+            log::error!("AteccSession::new failed rc={} (provisioning)", err);
+            return;
+        }
+    }
 
     let vol_key = match(|| -> Result<[u8; 32], i32>{
         let se = AteccSession::new()?;
