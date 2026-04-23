@@ -116,10 +116,14 @@ fn handle_enroll() {
                 Err(rc) => log::error!("Enroll error rc={}", rc)
             }
             log::info!("hello");*/
-            if crate::USE_R503 == 1 {
-                let _ = r503::enroll_once();
+            let enroll_result = if crate::USE_R503 == 1 {
+                r503::enroll_once()
             } else {
-                let _ = enroll_once();
+                enroll_once()
+            };
+            if let Err(rc) = enroll_result {
+                uart_write_str(&format!("ERR=enroll_failed={}\n", rc));
+                return;
             }
 
             let mut hexbuf = [0u8; 256];

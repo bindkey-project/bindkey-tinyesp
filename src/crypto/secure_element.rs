@@ -8,11 +8,17 @@ pub const ATCA_ZONE_CONFIG: u8 = 0x00;
 pub const ATCA_ZONE_DATA: u8   = 0x02;
 
 // SlotConfig (2 bytes par slot, little-endian)
-// Low byte  : [IsSecret(7)][EncryptRead(6)][LimitedUse(5)][NoMac(4)][ReadKey(3:0)]
+// Pour les slots "data", le low byte est:
+//   [IsSecret(7)][EncryptRead(6)][LimitedUse(5)][NoMac(4)][ReadKey(3:0)]
+// Pour les slots ECC privés, le low byte change complètement:
+//   [IsSecret(7)][unused(6:4)][WriteEcdh(3)][Ecdh(2)][IntSign(1)][ExtSign(0)]
 // High byte : [WriteConfig(7:4)][WriteKey(3:0)]
 // WriteConfig : 0x0=Always (écrasable même après data lock), 0x2=Never (protégé après data lock)
-const SC_ECC_PRIV: [u8; 2] = [0x80, 0x20]; // IsSecret, WriteConfig=Never
-const SC_CERT:     [u8; 2] = [0x00, 0x20]; // Public (cert lisible), WriteConfig=Never
+// 0x8F = slot ECC privé + autorise ExtSign/IntSign/ECDH/WriteEcdh.
+// 0x80 était invalide pour l'usage ECDSA: ExtSign=0 empêchait Sign.
+const SC_ECC_PRIV: [u8; 2] = [0x83, 0x20];
+const SC_ECDH:     [u8; 2] = [0x8F, 0x20];
+const SC_CERT:     [u8; 2] = [0x00, 0x00]; // Public (cert lisible), WriteConfig=Always
 const SC_HMAC:     [u8; 2] = [0x80, 0x20]; // IsSecret, WriteConfig=Never
 const SC_AES_KEY:  [u8; 2] = [0x00, 0x00]; // Readable, WriteConfig=Always (révocable)
 const SC_DISABLED: [u8; 2] = [0x80, 0x20]; // IsSecret, WriteConfig=Never
@@ -231,6 +237,17 @@ impl AteccSession{
     //   - read_device_cert() -> DER : reconstruction du X.509 complet pour auth serveur
     //   - X509id dans KC_DATA (slot 8) à mettre à jour pour matcher le template (0=désactivé pour l'instant)
 
+    pub fn read_config_zone(&self) -> Result<[u8; 128], i32> {
+        let mut buf = [0u8; 128];
+        unsafe {
+            let rc = atcab_read_config_zone(buf.as_mut_ptr());
+            if rc != ATCA_SUCCESS {
+                return Err(rc);
+            }
+        }
+        Ok(buf)
+    }
+
     pub fn sha_hmac(&self, key_slot: u16, msg: &[u8]) -> Result<[u8; 32], i32>{
         let mut out = [0u8; 32];
         unsafe{
@@ -352,7 +369,7 @@ pub fn provision_config_zone(se: &AteccSession) -> Result<(), i32> {
     #[rustfmt::skip]
     let slot_configs: [u8; 32] = [
         SC_ECC_PRIV[0],  SC_ECC_PRIV[1],  // slot  0 : ECC P256 private key
-        SC_ECC_PRIV[0],  SC_ECC_PRIV[1],  // slot  1 : ECC P256 réservé
+        SC_ECDH[0],      SC_ECDH[1],      // slot  1 : ECDH P256
         SC_DISABLED[0],  SC_DISABLED[1],  // slot  2 : désactivé
         SC_DISABLED[0],  SC_DISABLED[1],  // slot  3 : désactivé
         SC_DISABLED[0],  SC_DISABLED[1],  // slot  4 : désactivé
@@ -429,12 +446,26 @@ pub fn provision_config_zone(se: &AteccSession) -> Result<(), i32> {
         }
     }
 
+    // écriture de la clef pour ECDH
+    match se.get_pubkey(1) {
+        Ok(pk) => log::info!("SE: slot 1 ECC already present pubkey[0..4]={:02X?}", &pk[..4]),
+        Err(_) => {
+            let pk = se.gen_ecc_keypair(1)?;
+            log::info!("SE: slot 1 ECC keypair generated pubkey[0..4]={:02X?}", &pk[..4]);
+        }
+    }
+
     // Écriture du root HMAC secret dans slot 9 (aléa via atcab_random).
     // CRITIQUE : ce secret dérive TOUTES les clefs volumes via HMAC-SHA256.
     // Il ne peut pas être lu (IsSecret=1) — il est irrécouvrable si perdu.
     // On l'écrit une seule fois ici, protégé par le guard cfg_locked en tête de fonction.
     se.provision_root_secret_dev(9)?;
     log::info!("SE: slot 9 root HMAC secret written");
+
+    // Lock data zone : nécessaire pour que Sign fonctionne sur ATECC608A.
+    // Slots 10-14 restent inscriptibles (WriteConfig=Always).
+    se.lock_data_zone()?;
+    log::info!("SE: data zone locked");
 
     log::info!("SE: provisioning complete — device ready");
     Ok(())

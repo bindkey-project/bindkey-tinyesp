@@ -175,6 +175,32 @@ fn main() {
                 log::error!("SE provision_config_zone failed rc={}", err);
                 return;
             }
+            /*// One-shot : lock data zone (débloque Sign, slots 10-14 restent inscriptibles via WriteConfig=Always)
+            // Idempotent : lock_data_zone() vérifie déjà si lockée
+            if let Err(rc) = se.lock_data_zone() {
+                log::error!("SE lock_data_zone failed rc={}", rc);
+                return;
+            }*/
+            // Test : vérifie que slot 10 est toujours inscriptible après data lock (WriteConfig=Always)
+            /*let dummy = [0xABu8; 32];
+            match se.write_data_slot(10, 0, &dummy) {
+                Ok(()) => log::info!("SE: slot 10 write OK — WriteConfig=Always confirmé"),
+                Err(rc) => log::error!("SE: slot 10 write FAILED rc={} — PROBLÈME WriteConfig", rc),
+            }
+            match se.write_data_slot(8, 0, &dummy) {
+                Ok(()) => log::info!("SE: slot 8 write OK — WriteConfig=Always confirmé"),
+                Err(rc) => log::error!("SE: slot 8 write FAILED rc={} — PROBLÈME WriteConfig", rc),
+            }*/
+            // Lecture config zone pour vérifier SlotConfig[0] et KeyConfig[0]
+            match se.read_config_zone() {
+                Ok(cfg) => {
+                    log::info!("SE SlotConfig[0] (bytes 20-21) = {:02X?}", &cfg[20..22]);
+                    log::info!("SE KeyConfig[0]  (bytes 96-97) = {:02X?}", &cfg[96..98]);
+                }
+                Err(rc) => log::error!("SE read_config_zone failed rc={}", rc),
+            }
+            // Diagnostique clé slot 0 : pubkey + force GenKey (Lockable=1) + test sign
+            drop(se);
         }
         Err(err) => {
             log::error!("AteccSession::new failed rc={} (provisioning)", err);

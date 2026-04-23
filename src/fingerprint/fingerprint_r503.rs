@@ -1100,26 +1100,41 @@ pub fn fingerprint_validation() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// Single authentication attempt using sliced waiting.
-/// LED: blue breathing while waiting, green constant on success, red flash on failure.
+/// LED: blue breathing while waiting, green on success, red only if wrong finger placed.
 pub fn test_fingerprint_once() -> Result<(), Box<dyn std::error::Error>> {
-    log::info!("R503: place your finger");
-    let _ = led_breathing(LedColor::Blue, 0x80, 0);
+    loop {
+        log::info!("R503: place your finger");
+        let _ = led_breathing(LedColor::Blue, 0x80, 0);
 
-    let matched = wait_and_identify_sliced(25_000, 200, 10_000)?;
+        // Phase 1: wait for finger — Err = timeout (no finger), loop silently, no red
+        match wait_finger_and_capture("auth", 10_000) {
+            Err(_) => continue,
+            Ok(()) => {}
+        }
 
-    if matched {
-        log::info!("R503: finger recognized");
-        // Green stays on — device is now unlocked
-        let _ = led_on(LedColor::Green);
-    } else {
-        let _ = led_on(LedColor::Red);
-        thread::sleep(Duration::from_millis(500));
-        let _ = led_off();
-        return Err("R503: finger not recognized".into());
+        // Phase 2: finger was placed — identify
+        if let Err(e) = img_to_tz(1) {
+            log::error!("R503: img_to_tz error: {}, retrying...", e);
+            continue;
+        }
+
+        match search(0, 200) {
+            Ok((page_id, score)) => {
+                log::info!("R503: matched id={}, score={}", page_id, score);
+                wait_finger_removed(5_000);
+                let _ = led_on(LedColor::Green);
+                return Ok(());
+            }
+            Err(_) => {
+                // finger placed but not recognized — red
+                log::warn!("R503: wrong finger");
+                wait_finger_removed(5_000);
+                let _ = led_on(LedColor::Red);
+                thread::sleep(Duration::from_millis(500));
+                let _ = led_off();
+            }
+        }
     }
-
-    log::info!("R503: fingerprint validated");
-    Ok(())
 }
 
 /// Multi-phase fingerprint identification with sliced waiting.
