@@ -11,6 +11,7 @@ static SPI_CMD_COUNT: AtomicU32 = AtomicU32::new(0);
 static SPI_TX_BYTES: AtomicU32 = AtomicU32::new(0);
 static SPI_RX_BYTES: AtomicU32 = AtomicU32::new(0);
 static SPI_TIME_US: AtomicU32 = AtomicU32::new(0);
+const ENABLE_SPI_STATS_LOGS: bool = false;
 
 pub fn set_global_spi(master: &mut SpiMaster){
     GLOBAL_SPI.store(master as *mut _, Ordering::Release);
@@ -33,7 +34,7 @@ fn spi_stats_add(cmd: Cmd, tx_bytes: usize, rx_bytes: usize, dt_us: u64){
     SPI_RX_BYTES.fetch_add(rx_bytes as u32, Ordering::Relaxed);
     SPI_TIME_US.fetch_add(dt_us as u32, Ordering::Relaxed);
 
-    if (n & 1023) == 0{
+    if ENABLE_SPI_STATS_LOGS && (n & 1023) == 0{
         let tx = SPI_TX_BYTES.load(Ordering::Relaxed);
         let rx = SPI_RX_BYTES.load(Ordering::Relaxed);
         let t = SPI_TIME_US.load(Ordering::Relaxed);

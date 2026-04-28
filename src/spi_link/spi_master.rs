@@ -10,6 +10,7 @@ extern "C" {
 }
 
 static IDLE_FEED_CTR: AtomicU32 = AtomicU32::new(0);
+const ENABLE_SPI_PROF_LOGS: bool = true;
 
 #[derive(Default)]
 struct Perf{
@@ -29,7 +30,7 @@ impl Perf{
     }
 
     fn log_if_needed(&self){
-        if self.ops == 0 || (self.ops % 256) != 0 {
+        if !ENABLE_SPI_PROF_LOGS || self.ops == 0 || (self.ops % 256) != 0 {
             return;
         }
         let ops = self.ops as f64;

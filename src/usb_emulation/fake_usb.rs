@@ -37,11 +37,19 @@ static NEEDS_UNIT_ATTENTION: AtomicBool = AtomicBool::new(false);
 /// Cleared by exit_format_mode() once the first volume is created.
 static DISK_FORMATTING: AtomicBool = AtomicBool::new(false);
 
+// debug du problème des medium not ready + callback suppressed
+static BD0_CONSECUTIVE: AtomicU32 = AtomicU32::new(0);
+const BD0_MEDIUM_ABSENT_THRESHOLD: u32 = 30;
+// vTaskDelay() takes FreeRTOS ticks, not milliseconds.
+// This repo sets CONFIG_FREERTOS_HZ=1000, so 50 ticks = 50 ms.
+const BD0_BOOT_RETRY_DELAY_TICKS: u32 = 50;
+
 /// Called by UART task on `action=init_format` so the OS sees the disk as a new medium
 /// when volumes are re-configured, instead of the old stale state.
 pub fn reset_disk_state() {
     MEDIA_WAS_READY.store(0, Ordering::Relaxed);
     DISK_LOGGED.store(0, Ordering::Relaxed);
+    BD0_CONSECUTIVE.store(0, Ordering::Relaxed);
     GATE_LOGGED.store(0, Ordering::Relaxed);
     NEEDS_UNIT_ATTENTION.store(true, Ordering::Relaxed);
     log::info!("disk state reset: disk hidden until volumes re-configured via UART");
@@ -198,6 +206,8 @@ pub extern "C" fn tud_msc_test_unit_ready_cb(_lun: u8) -> bool{
 
     match spi.get_status(){
         Ok((st, bd_status)) if st == ESP_OK && bd_status == 2 => {
+            BD0_CONSECUTIVE.store(0, Ordering::Relaxed);
+
             // Flush BK Table first (deferred from UART task).
             // Must run even when we're about to gate the disk hidden, so that
             // action=init_format (num_volumes=0) is persisted before a reboot.
@@ -256,20 +266,36 @@ pub extern "C" fn tud_msc_test_unit_ready_cb(_lun: u8) -> bool{
             true
         }
         Ok((st, bd_status)) if st == ESP_OK && bd_status == 0 => {
-            // confirm with a retry before declaring medium absent
-            let confirmed = match spi.get_status(){
-                Ok((s, d)) if s == ESP_OK && d == 0 => true,
-                _ => false,
-            };
-            if !confirmed{
-                // transient — if we saw ready before, just say "becoming ready"
-                if MEDIA_WAS_READY.load(Ordering::Relaxed) == 1{
-                    return true; // pretend still ready — likely SPI glitch
+            let count = BD0_CONSECUTIVE.fetch_add(1, Ordering::Relaxed) + 1;
+            let was_ready = MEDIA_WAS_READY.load(Ordering::Relaxed) == 1;
+
+            if was_ready && count < BD0_MEDIUM_ABSENT_THRESHOLD{
+                log::warn!("TUR: bd_status=0 while media was ready (count={}/{}) -> BECOMING_READY, not MEDIUM_NOT_PRESENT", count, BD0_MEDIUM_ABSENT_THRESHOLD);
+                unsafe{
+                    tud_msc_set_sense(_lun, SCSI_SENSE_NOT_READY, SCSI_ASC_LUN_NOT_READY, SCSI_ASCQ_BECOMING_READY);
                 }
-                unsafe{ tud_msc_set_sense(_lun, SCSI_SENSE_NOT_READY, SCSI_ASC_LUN_NOT_READY, SCSI_ASCQ_BECOMING_READY); }
                 return false;
             }
+
+            // si le disque n'était jamais READY, on garde une confirmation avec délai pour éviter le glitch 
+            if !was_ready{
+                unsafe{
+                    vTaskDelay(BD0_BOOT_RETRY_DELAY_TICKS);
+                }
+                match spi.get_status(){
+                    Ok((s, d)) if s == ESP_OK && d == 0 => {}
+                    _ => {
+                        log::warn!("TUR: bd_status=0 before first ready was transient -> BECOMING_READY"); 
+                        unsafe{
+                            tud_msc_set_sense(_lun, SCSI_SENSE_NOT_READY, SCSI_ASC_LUN_NOT_READY, SCSI_ASCQ_BECOMING_READY);
+                        }
+                        return false;
+                    }
+                }
+            }
+
             // genuinely not present (confirmed twice)
+            log::warn!("TUR: bd_status=0 confirmed count={} -> declaring MEDIUM_NOT_PRESENT", count);
             MEDIA_WAS_READY.store(0, Ordering::Relaxed);
             
             unsafe{
@@ -278,6 +304,8 @@ pub extern "C" fn tud_msc_test_unit_ready_cb(_lun: u8) -> bool{
             false
         }
         Ok((st, bd_status)) if st == ESP_OK && bd_status == 1 => {
+            BD0_CONSECUTIVE.store(0, Ordering::Relaxed);
+
             // slave NotReady (drive reconnecting, block_count=0) — legitimate transient state,
             // NOT a SPI error: never pretend ready here or reads will immediately fail
             log::info!("TUR: slave NotReady (bd=1) → BECOMING_READY");
@@ -459,12 +487,20 @@ pub extern "C" fn tud_msc_write10_cb(lun: u8, _lba: u32, offset: u32, _buffer: *
                 //log::info!("WRITE10 OK lba={} nblocks={}", _lba, nblocks);
                 bufsize as i32
             }
-            Err(_e) => {
-                log::error!("WRITE10 FAILED lba={} nblocks={} err={}", _lba, nblocks, _e);
-                unsafe{
-                    tud_msc_set_sense(lun, SCSI_SENSE_MEDIUM_ERROR, SCSI_ASC_UNRECOVERED_READ_ERROR, SCSI_ASCQ);
+            Err(first_err) => {
+                log::warn!("MSC write10: first attempt failed lba={} nblocks={} err={}, retrying with cache invalidation", _lba, nblocks, first_err);
+                disk.invalidate_meta_cache();
+                match disk.write10(spi, _lba, nblocks, data){
+                    Ok(()) => bufsize as i32,
+                    Err(_e) => {
+                        log::error!("MSC write10: retry failed lba={} nblocks={} err={}", _lba, nblocks, _e);
+                        log::error!("SENSE_SOURCE=WRITE10_FAILED setting MEDIUM_ERROR/UNRECOVERED_READ_ERROR lba={} nblocks={} err={}", _lba, nblocks, _e);
+                        unsafe{
+                            tud_msc_set_sense(lun, SCSI_SENSE_MEDIUM_ERROR, SCSI_ASC_UNRECOVERED_READ_ERROR, SCSI_ASCQ);
+                        }
+                        -1
+                    }
                 }
-                -1
             }
         }
     }
