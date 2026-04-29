@@ -1,7 +1,10 @@
 use core::ptr;
 use core::sync::atomic::{AtomicPtr, AtomicBool, Ordering};
 use esp_idf_sys::*;
-use super::disk_layout::SECTOR_SIZE;                                                                                                                                                                                                      
+use super::disk_layout::SECTOR_SIZE;  
+use crate::crypto::secure_element::{AteccSession, derive_volume_key_hmac};    
+use super::encrypted_disk::EncryptedDisk;
+use crate::spi_link::spi_master::SpiMaster;                                                                                                                                                                                                 
                                                                                                                                                                                                                                             
 pub const BK_TABLE_MAGIC: [u8; 4] = *b"BKVT";                                                                                                                                                                                             
 pub const BK_TABLE_VERSION: u8 = 1;                                                                                                                                                                                                       
@@ -193,4 +196,50 @@ pub fn is_bk_table_dirty() -> bool{
 
 pub fn clear_bk_table_dirty(){
     BK_TABLE_DIRTY.store(false, Ordering::Release);
+}
+
+
+pub fn read_bk_table_from_storage(spi: &mut SpiMaster) -> Result<BkTable, i32>{
+    let mut buf = [0u8; SECTOR_SIZE];
+    spi.read(0, 1, SECTOR_SIZE as u32, &mut buf)?;
+    Ok(BkTable::decode_or_default(&buf))
+}
+
+pub fn restore_volumes_from_bk_table(table: &BkTable, disk: &mut EncryptedDisk) -> Result<(), i32>{
+    disk.clear_volumes();
+
+    if table.num_volumes == 0{
+        return Ok(());
+    }
+
+    let se = AteccSession::new()?;
+    for i in 0..table.num_volumes as usize{
+        let entry = &table.entries[i];
+        log::info!("restore vol {} volume_id={:02X?}", i, &entry.volume_id);
+        let key = derive_volume_key_hmac(&se, 9, entry.volume_id)?;
+        log::info!("restore vol {} key[0..4] = {:02X?}", i, &key[..4]);
+        disk.add_volume(entry.lba_start, entry.lba_end, &key)?;
+        log::info!("volume {} restaure lba {}..{}", i, entry.lba_start, entry.lba_end);
+    }
+
+    Ok(())
+}
+
+pub fn reload_global_bk_table_from_storage(spi: &mut SpiMaster, disk: &mut EncryptedDisk) -> Result<(), i32>{
+    let table = read_bk_table_from_storage(spi)?;
+    let num_volumes = table.num_volumes;
+    let initialized = table.initialized;
+
+    restore_volumes_from_bk_table(&table, disk)?;
+
+    let Some(global_table) = get_global_bk_table() else{
+        return Err(ESP_ERR_INVALID_STATE);
+    };
+
+    *global_table = table;
+    clear_bk_table_dirty();
+
+    log::info!("BK Table reloaded from storage: {} volume(s), initialized={}", num_volumes, initialized);
+
+    Ok(())
 }

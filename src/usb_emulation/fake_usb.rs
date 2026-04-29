@@ -14,7 +14,10 @@ use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use crate::spi_link::api_spi::get_global_spi;
 
 use crate::crypto::encrypted_disk::get_global_disk;
-use crate::crypto::volume_table::{get_global_bk_table, is_bk_table_dirty, clear_bk_table_dirty};
+use crate::crypto::volume_table::{
+    get_global_bk_table, is_bk_table_dirty, clear_bk_table_dirty,
+    reload_global_bk_table_from_storage,
+};
 
 //fake disk parameters, 4096 blocs = 2MiB => ok for the os to see a disk and mount/format it
 const BLOCK_SIZE: u16 = 512;
@@ -36,10 +39,12 @@ static NEEDS_UNIT_ATTENTION: AtomicBool = AtomicBool::new(false);
 /// so the OS can still write the msdos partition table via force_format.
 /// Cleared by exit_format_mode() once the first volume is created.
 static DISK_FORMATTING: AtomicBool = AtomicBool::new(false);
+static BK_TABLE_RELOAD_PENDING: AtomicBool = AtomicBool::new(false);
+static BK_TABLE_LATE_LOAD_DONE: AtomicBool = AtomicBool::new(false);
 
 // debug du problème des medium not ready + callback suppressed
 static BD0_CONSECUTIVE: AtomicU32 = AtomicU32::new(0);
-const BD0_MEDIUM_ABSENT_THRESHOLD: u32 = 30;
+const BD0_MEDIUM_ABSENT_THRESHOLD: u32 = 2;
 // vTaskDelay() takes FreeRTOS ticks, not milliseconds.
 // This repo sets CONFIG_FREERTOS_HZ=1000, so 50 ticks = 50 ms.
 const BD0_BOOT_RETRY_DELAY_TICKS: u32 = 50;
@@ -51,6 +56,8 @@ pub fn reset_disk_state() {
     DISK_LOGGED.store(0, Ordering::Relaxed);
     BD0_CONSECUTIVE.store(0, Ordering::Relaxed);
     GATE_LOGGED.store(0, Ordering::Relaxed);
+    BK_TABLE_RELOAD_PENDING.store(false, Ordering::Relaxed);
+    BK_TABLE_LATE_LOAD_DONE.store(false, Ordering::Relaxed);
     NEEDS_UNIT_ATTENTION.store(true, Ordering::Relaxed);
     log::info!("disk state reset: disk hidden until volumes re-configured via UART");
 }
@@ -208,6 +215,38 @@ pub extern "C" fn tud_msc_test_unit_ready_cb(_lun: u8) -> bool{
         Ok((st, bd_status)) if st == ESP_OK && bd_status == 2 => {
             BD0_CONSECUTIVE.store(0, Ordering::Relaxed);
 
+            let table_missing_from_boot = get_global_bk_table()
+                .map(|table| !table.initialized && table.num_volumes == 0)
+                .unwrap_or(false);
+            let should_reload_bk_table = (BK_TABLE_RELOAD_PENDING.load(Ordering::Relaxed)
+                || (!BK_TABLE_LATE_LOAD_DONE.load(Ordering::Relaxed) && table_missing_from_boot))
+                && !is_bk_table_dirty()
+                && !DISK_FORMATTING.load(Ordering::Relaxed);
+
+            if should_reload_bk_table {
+                match get_global_disk() {
+                    Some(disk) => {
+                        match reload_global_bk_table_from_storage(spi, disk) {
+                            Ok(()) => {
+                                BK_TABLE_RELOAD_PENDING.store(false, Ordering::Relaxed);
+                                BK_TABLE_LATE_LOAD_DONE.store(true, Ordering::Relaxed);
+                                DISK_LOGGED.store(0, Ordering::Relaxed);
+                            }
+                            Err(e) => {
+                                log::warn!("TUR: BK Table reload failed err={}, keeping disk not ready", e);
+                            }
+                        }
+                    }
+                    None => {
+                        log::warn!("TUR: BK Table reload requested but encrypted disk is not initialized");
+                    }
+                }
+                unsafe {
+                    tud_msc_set_sense(_lun, SCSI_SENSE_NOT_READY, SCSI_ASC_LUN_NOT_READY, SCSI_ASCQ_BECOMING_READY);
+                }
+                return false;
+            }
+
             // Flush BK Table first (deferred from UART task).
             // Must run even when we're about to gate the disk hidden, so that
             // action=init_format (num_volumes=0) is persisted before a reboot.
@@ -270,7 +309,7 @@ pub extern "C" fn tud_msc_test_unit_ready_cb(_lun: u8) -> bool{
             let was_ready = MEDIA_WAS_READY.load(Ordering::Relaxed) == 1;
 
             if was_ready && count < BD0_MEDIUM_ABSENT_THRESHOLD{
-                log::warn!("TUR: bd_status=0 while media was ready (count={}/{}) -> BECOMING_READY, not MEDIUM_NOT_PRESENT", count, BD0_MEDIUM_ABSENT_THRESHOLD);
+                //log::warn!("TUR: bd_status=0 while media was ready (count={}/{}) -> BECOMING_READY, not MEDIUM_NOT_PRESENT", count, BD0_MEDIUM_ABSENT_THRESHOLD);
                 unsafe{
                     tud_msc_set_sense(_lun, SCSI_SENSE_NOT_READY, SCSI_ASC_LUN_NOT_READY, SCSI_ASCQ_BECOMING_READY);
                 }
@@ -295,8 +334,10 @@ pub extern "C" fn tud_msc_test_unit_ready_cb(_lun: u8) -> bool{
             }
 
             // genuinely not present (confirmed twice)
-            log::warn!("TUR: bd_status=0 confirmed count={} -> declaring MEDIUM_NOT_PRESENT", count);
+            //log::warn!("TUR: bd_status=0 confirmed count={} -> declaring MEDIUM_NOT_PRESENT", count);
             MEDIA_WAS_READY.store(0, Ordering::Relaxed);
+            BK_TABLE_RELOAD_PENDING.store(true, Ordering::Relaxed);
+            BK_TABLE_LATE_LOAD_DONE.store(false, Ordering::Relaxed);
             
             unsafe{
                 tud_msc_set_sense(_lun, SCSI_SENSE_NOT_READY, SCSI_ASC_MEDIUM_NOT_PRESENT, SCSI_ASCQ);
@@ -305,6 +346,8 @@ pub extern "C" fn tud_msc_test_unit_ready_cb(_lun: u8) -> bool{
         }
         Ok((st, bd_status)) if st == ESP_OK && bd_status == 1 => {
             BD0_CONSECUTIVE.store(0, Ordering::Relaxed);
+            BK_TABLE_RELOAD_PENDING.store(true, Ordering::Relaxed);
+            BK_TABLE_LATE_LOAD_DONE.store(false, Ordering::Relaxed);
 
             // slave NotReady (drive reconnecting, block_count=0) — legitimate transient state,
             // NOT a SPI error: never pretend ready here or reads will immediately fail

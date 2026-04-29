@@ -9,7 +9,10 @@ mod fingerprint;
 mod software_link;
 mod led;
 
-use crate::crypto::{BkTable, set_global_bk_table};
+use crate::crypto::{
+    BkTable, set_global_bk_table,
+    read_bk_table_from_storage, restore_volumes_from_bk_table,
+};
 use crate::usb_emulation::fake_usb::*;
 use crate::spi_link::spi_master::SpiMaster;
 use crate::spi_link::api_spi::set_global_spi;
@@ -126,14 +129,13 @@ fn main() {
 
     set_global_spi(&mut spi);
 
-    let mut bk_buf = [0u8; 512];
     // Retry : le slave SPI peut prendre quelques secondes à démarrer après le boot
     let bk_table = {
         let mut table = BkTable::new();
         for attempt in 0..5u32 {
-            match spi.read(0, 1, 512, &mut bk_buf) {
-                Ok(()) => {
-                    table = BkTable::decode_or_default(&bk_buf);
+            match read_bk_table_from_storage(&mut spi) {
+                Ok(t) => {
+                    table = t;
                     log::info!("BK Table: {} volume(s), attempt {}", table.num_volumes, attempt);
                     break;
                 }
@@ -243,26 +245,8 @@ fn main() {
     let bk_table_ref: &'static mut BkTable = Box::leak(Box::new(bk_table));
     set_global_bk_table(bk_table_ref);
 
-    if bk_table_ref.num_volumes > 0{
-        match AteccSession::new(){
-            Ok(se) => {
-                for i in 0..bk_table_ref.num_volumes as usize{
-                    let entry = &bk_table_ref.entries[i];
-                    log::info!("restore vol {} volume_id={:02X?}", i, &entry.volume_id);
-                    match derive_volume_key_hmac(&se, 9, entry.volume_id){
-                        Ok(key) => {
-                            log::info!("restore vol {} key[0..4] = {:02X?}", i, &key[..4]);
-                            match disk_ref.add_volume(entry.lba_start, entry.lba_end, &key){
-                                Ok(()) => log::info!("volume {} restaure lba={}..{}", i, entry.lba_start, entry.lba_end),
-                                Err(e) => log::error!("add_volume {} failed: {}", i, e)
-                            }
-                        },
-                        Err(e) => log::error!("derive key volume {} failed: {}", i, e)
-                    }
-                }
-            }
-            Err(e) => log::error!("AteccSession restauration failed: {}", e)
-        }
+    if let Err(e) = restore_volumes_from_bk_table(bk_table_ref, disk_ref){
+        log::error!("BK Table volume restore failed: {}", e);
     }
 
     unsafe{
