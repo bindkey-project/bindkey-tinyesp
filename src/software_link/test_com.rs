@@ -233,11 +233,10 @@ fn handle_enroll() {
         Ok((sn, pub_sign, pub_ecdh))
     })() {
         Ok((sn, pub_sign, pub_ecdh)) => {
-            /*match enroll_once(){
-                Ok(()) => log::info!("Enrolled !"),
-                Err(rc) => log::error!("Enroll error rc={}", rc)
-            }
-            log::info!("hello");*/
+            // === Fingerprint enrollment disabled for tests with single sensor ===
+            // Décommenter pour réactiver l'enrôlement biométrique du capteur lors de `enroll` UART.
+            log::warn!("handle_enroll: fingerprint enrollment BYPASSED (test mode)");
+            /*
             let enroll_result = if crate::USE_R503 == 1 {
                 r503::enroll_once()
             } else {
@@ -247,6 +246,7 @@ fn handle_enroll() {
                 uart_write_str(&format!("ERR=enroll_failed={}\n", rc));
                 return;
             }
+            */
 
             let mut hexbuf = [0u8; 256];
 
@@ -298,12 +298,17 @@ fn handle_challenge_hex(hex: &str) {
         }
     };
 
-    // fingerprint + signature
+    // === Fingerprint check disabled for tests with single sensor ===
+    // Décommenter le bloc original ci-dessous et supprimer le stub pour réactiver le gate biométrique.
+    log::warn!("handle_challenge_hex: fingerprint check BYPASSED (test mode)");
+    /*
     let fp_result = if crate::USE_R503 == 1 {
         r503::test_fingerprint_once()
     } else {
         test_fingerprint_once()
     };
+    */
+    let fp_result: Result<(), i32> = Ok(());
     match fp_result {
         Ok(()) => {
             match (|| -> Result<[u8; 64], i32> {
@@ -572,6 +577,9 @@ pub fn uart_proto_task() -> Result<(), i32> {
                             }
                         }
                         else if msg == "action=init_format"{
+                            // Force the host to drop stale partition/media state before
+                            // it writes a new msdos table through the format bypass.
+                            reset_disk_state();
                             if let Some(disk) = get_global_disk() {
                                 disk.clear_volumes();
                             }

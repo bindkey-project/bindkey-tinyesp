@@ -39,6 +39,10 @@ fn main() {
 
     let _led = LedGuard::new();
 
+    // === Fingerprint auth disabled for tests with single sensor shared between 2 PCBs ===
+    // Décommenter ce bloc pour réactiver l'auth biometrique au boot.
+    log::warn!("Fingerprint auth BYPASSED (test mode — single sensor shared)");
+    /*
     log::info!("Fingerprint authentication required...");
 
     if USE_R503 == 1 {
@@ -101,6 +105,7 @@ fn main() {
             }
         }
     }
+    */
     
 
     log::info!("Starting fake USB MSC + SPI...");
