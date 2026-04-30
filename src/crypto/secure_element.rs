@@ -1,4 +1,7 @@
 use core::ffi::c_int;
+use esp_idf_sys::*;
+
+use crate::crypto::aes::AesGcm;
 
 //error code CryptoAuthLib: 0 = ATCA_SUCCESS
 pub const ATCA_SUCCESS: i32 = 0;
@@ -44,8 +47,6 @@ pub const ATCA_SIG_SIZE: usize = 64;
 
 pub const SHA_MODE_TARGET_OUT_ONLY: u8  = 0xC0;
 
-pub const GPT_VOLUME_ID: [u8; 16] = *b"bindkey-mbr-v000";
-
 #[repr(C)]
 pub struct ATCAIfaceCfg {
     _private: [u8; 0] //opaque config no display to rust layout
@@ -71,9 +72,13 @@ extern "C" {
 
     fn atcab_sign(key_id: u16, msg: *const u8, sig: *mut u8) -> c_int;
 
+    fn atcab_read_bytes_zone(zone: u8, slot: u16, offset: usize, data: *mut u8, length: usize) -> c_int;
     fn atcab_write_bytes_zone(zone: u8, slot: u16, offset_bytes: usize, data: *const u8, length: usize) -> c_int;
 
     fn atcab_sha_hmac(data: *const u8, data_size: usize, key_slot: u16, digest: *mut u8, target: u8,) -> c_int;
+
+    fn atcab_ecdh(key_id: u16, public_key: *const u8, pms: *mut u8) -> c_int;
+    fn atcab_ecdh_base(mode: u8, key_id: u16, public_key: *const u8, pms: *mut u8, out_nonce: *mut u8) -> c_int;
 }
 
 pub struct AteccSession;
@@ -160,6 +165,19 @@ impl AteccSession{
         Ok(pk)
     }
 
+    pub fn read_data_slot(&self, slot: u16, offset: usize, len: usize, out: &mut [u8]) -> Result<(), i32>{
+        if out.len() < len{
+            return Err(ESP_ERR_INVALID_SIZE);
+        }
+        unsafe{
+            let rc = atcab_read_bytes_zone(ATCA_ZONE_DATA, slot, offset, out.as_mut_ptr(), len);
+            if rc != ATCA_SUCCESS{
+                return Err(rc);
+            }
+            Ok(())
+        }
+    }
+
     pub fn write_data_slot(&self, slot: u16, offset: usize, data: &[u8]) -> Result<(), i32>{
         unsafe{
             let rc = atcab_write_bytes_zone(ATCA_ZONE_DATA, slot, offset, data.as_ptr(), data.len());
@@ -214,6 +232,29 @@ impl AteccSession{
             }
             Ok(sig)
         }   
+    }
+
+    pub fn ecdh(&self, slot: u16, peer_pub: &[u8; 64]) -> Result<[u8; 32], i32>{
+        // Mode 0x0C = ECDH_MODE_COPY_OUTPUT_BUFFER
+        // Force la sortie du PMS dans le buffer de réponse, indépendamment de
+        // SlotConfig.WriteEcdh. Notre SC_ECDH = 0x8F a WriteEcdh=1 (mode "écrit
+        // dans le slot N+1") donc atcab_ecdh() (mode 0x00 = COMPATIBLE) tenterait
+        // d'écrire dans slot 2 (désactivé) → rejet du chip avec rc=-46.
+        const ECDH_MODE_COPY_OUTPUT_BUFFER: u8 = 0x0C;
+        let mut pms = [0u8; 32];
+        unsafe{
+            let rc = atcab_ecdh_base(
+                ECDH_MODE_COPY_OUTPUT_BUFFER,
+                slot,
+                peer_pub.as_ptr(),
+                pms.as_mut_ptr(),
+                core::ptr::null_mut(),
+            );
+            if rc != ATCA_SUCCESS{
+                return Err(rc);
+            }
+        }
+        Ok(pms)
     }
 
     pub fn provision_root_secret_dev(&self, slot: u16) -> Result<(), i32>{
@@ -345,6 +386,46 @@ pub fn test_hmac_volume_derivation(root_slot: u16) -> Result<(), i32>{
     log::info!("difference check A vs B: {}", k_a1 != k_b);
 
     Ok(())
+}
+
+pub fn wrap_volume_key(se: &AteccSession, my_slot: u16, peer_pub: &[u8; 64], volume_key: &[u8; 32], aad: &[u8]) -> Result<[u8; 60], i32>{
+    // ECDH(my_priv, peer_pub) => KEK 32 bytes
+    let kek = se.ecdh(my_slot, peer_pub)?;
+
+    // Nonce 12 bytes via SE random
+    let r = se.random32()?;
+    let mut nonce = [0u8; 12];
+    nonce.copy_from_slice(&r[..12]);
+
+    // AES-GCM encrypt
+    let mut gcm = AesGcm::new(&kek)?;
+    let mut ciphertext = [0u8; 32];
+    let mut tag = [0u8; 16];
+    gcm.encrypt_and_tag(&nonce, aad, volume_key, &mut ciphertext, &mut tag)?;
+
+    // Pack nonce(12) || ct(32) || tag(16) = 60 bytes
+    let mut bundle = [0u8; 60];
+    bundle[0..12].copy_from_slice(&nonce);
+    bundle[12..44].copy_from_slice(&ciphertext);
+    bundle[44..60].copy_from_slice(&tag);
+
+    Ok(bundle)
+}
+
+pub fn unwrap_volume_key(se: &AteccSession, my_slot: u16, peer_pub: &[u8; 64], bundle: &[u8; 60], aad: &[u8]) -> Result<[u8; 32], i32>{
+    let kek = se.ecdh(my_slot, peer_pub)?;
+
+    let mut nonce = [0u8; 12];
+    nonce.copy_from_slice(&bundle[0..12]);
+    let ciphertext = &bundle[12..44];
+    let mut tag = [0u8; 16];
+    tag.copy_from_slice(&bundle[44..60]);
+
+    let mut gcm = AesGcm::new(&kek)?;
+    let mut volume_key = [0u8; 32];
+    gcm.auth_decrypt(&nonce, aad, ciphertext, &tag, &mut volume_key)?;
+
+    Ok(volume_key)
 }
 
 /// Configure la config zone de l'ATECC608 et la verrouille.

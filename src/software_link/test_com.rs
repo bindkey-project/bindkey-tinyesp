@@ -1,6 +1,6 @@
 use core::{ffi::c_void, mem::zeroed, ptr};
 use esp_idf_sys as sys;
-use crate::crypto::{get_global_disk, get_global_bk_table, mark_bk_table_dirty, secure_element::*};
+use crate::crypto::{get_global_disk, get_global_bk_table, mark_bk_table_dirty, secure_element::*, volume_table::*};
 use crate::usb_emulation::fake_usb::{reset_disk_state, enter_format_mode, exit_format_mode, is_disk_formatting};
 use crate::fingerprint::*;
 use crate::fingerprint::fingerprint_r503 as r503;
@@ -11,6 +11,7 @@ const TX_PIN: i32 = 2;
 const BAUD: i32 = 115_200;
 
 const SLOT: u16 = 0;
+const SLOT_ECDH: u16 = 1;
 
 struct VolumeCmd{
     name: [u8; 32],
@@ -29,6 +30,61 @@ impl VolumeCmd{
             volume_id: [0u8; 16],
             lba_start: 0,
             lba_end: 0,
+            fields: 0
+        }
+    }
+
+    fn is_complete(&self) -> bool{
+        self.fields == 0x0F
+    }
+
+    fn reset(&mut self){
+        *self = Self::new();
+    }
+}
+
+struct RecvShareCmd{
+    slot: u16,                  // slot ATECC où stocker la clé déwrappée (10..14)
+    source_pubkey: [u8; 64],    // pubkey ECDH (slot 1) de la BK source
+    wrapped: [u8; 60],          // nonce(12) || ct(32) || tag(16)
+    fields: u8,                 // 0x01=slot, 0x02=src_pub, 0x04=wrapped
+}
+
+impl RecvShareCmd{
+    fn new() -> Self{
+        Self{
+            slot: 0,
+            source_pubkey: [0u8; 64],
+            wrapped: [0u8; 60],
+            fields: 0
+        }
+    }
+
+    fn is_complete(&self) -> bool{
+        self.fields == 0x07
+    }
+
+    fn reset(&mut self){
+        *self = Self::new();
+    }
+}
+
+
+struct ShareCmd{
+    volume_id: [u8; 16],        // identifiant du volume à partager 
+    target_sn: [u8; 9],         // SN du SE de la BK cible
+    target_pubkey: [u8; 64],    // pubkey ECDH (slot 1) de la BK cible
+    target_slot: u16,           // slot ATECC où la cible stockera la clef 10 à 14
+    fields: u8                  // 0x01=vol_id, 0x02=target_sn, 0x04=target_pubkey, 0x08=target_slot
+}
+
+impl ShareCmd{
+    fn new() -> Self{
+        Self{
+            volume_id: [0u8; 16],
+            target_sn: [0u8; 9],
+            target_pubkey: [0u8; 64],
+            target_slot: 0,
             fields: 0
         }
     }
@@ -99,18 +155,84 @@ fn hex_to_bytes_32(s: &str) -> Option<[u8; 32]> {
     Some(out)
 }
 
+// attend exactement 128 hex chars (pubkey P-256 X || Y)
+fn hex_to_bytes_64(s: &str) -> Option<[u8; 64]> {
+    let b = s.as_bytes();
+    if b.len() != 128 {
+        log::error!("bad hex64 len={}, expected 128", b.len());
+        return None;
+    }
+    let mut out = [0u8; 64];
+    for i in 0..64 {
+        let hi = hex_val(b[2 * i])?;
+        let lo = hex_val(b[2 * i + 1])?;
+        out[i] = (hi << 4) | lo;
+    }
+    Some(out)
+}
+
+// attend exactement 18 hex chars (SN ATECC608)
+fn hex_to_bytes_9(s: &str) -> Option<[u8; 9]> {
+    let b = s.as_bytes();
+    if b.len() != 18 {
+        log::error!("bad hex9 len={}, expected 18", b.len());
+        return None;
+    }
+    let mut out = [0u8; 9];
+    for i in 0..9 {
+        let hi = hex_val(b[2 * i])?;
+        let lo = hex_val(b[2 * i + 1])?;
+        out[i] = (hi << 4) | lo;
+    }
+    Some(out)
+}
+
+// attend exactement 32 hex chars (volume_id 16B)
+fn hex_to_bytes_16(s: &str) -> Option<[u8; 16]> {
+    let b = s.as_bytes();
+    if b.len() != 32 {
+        log::error!("bad hex16 len={}, expected 32", b.len());
+        return None;
+    }
+    let mut out = [0u8; 16];
+    for i in 0..16 {
+        let hi = hex_val(b[2 * i])?;
+        let lo = hex_val(b[2 * i + 1])?;
+        out[i] = (hi << 4) | lo;
+    }
+    Some(out)
+}
+
+// attend exactement 120 hex chars (wrapped bundle = nonce 12 + ct 32 + tag 16)
+fn hex_to_bytes_60(s: &str) -> Option<[u8; 60]> {
+    let b = s.as_bytes();
+    if b.len() != 120 {
+        log::error!("bad hex60 len={}, expected 120", b.len());
+        return None;
+    }
+    let mut out = [0u8; 60];
+    for i in 0..60 {
+        let hi = hex_val(b[2 * i])?;
+        let lo = hex_val(b[2 * i + 1])?;
+        out[i] = (hi << 4) | lo;
+    }
+    Some(out)
+}
+
 
 
 fn handle_enroll() {
-    match (|| -> Result<([u8; 9], [u8; 64]), i32> {
+    match (|| -> Result<([u8; 9], [u8; 64], [u8; 64]), i32> {
         let se = AteccSession::new()?;
         let sn = se.serial_number()?;      // [u8;9]
-        let pubkey = se.get_pubkey(SLOT)?; // [u8;64]
+        let pub_sign = se.get_pubkey(SLOT)?; // [u8;64]
+        let pub_ecdh = se.get_pubkey(SLOT_ECDH)?;
         log::info!("sn={:02X?}", sn);
-        log::info!("pubkey()={:02X?}", pubkey);
-        Ok((sn, pubkey))
+        log::info!("pub_sign()={:02X?}", pub_sign);
+        log::info!("pub_ecdh()={:02X?}", pub_ecdh);
+        Ok((sn, pub_sign, pub_ecdh))
     })() {
-        Ok((sn, pubkey)) => {
+        Ok((sn, pub_sign, pub_ecdh)) => {
             /*match enroll_once(){
                 Ok(()) => log::info!("Enrolled !"),
                 Err(rc) => log::error!("Enroll error rc={}", rc)
@@ -133,8 +255,13 @@ fn handle_enroll() {
             uart_write_bytes(&hexbuf[..n_sn]);
             uart_write_str("\n");
 
-            uart_write_str("PUB=");
-            let n_pk = bytes_to_hex_upper(&pubkey, &mut hexbuf);
+            uart_write_str("PUB_SIGN=");
+            let n_pk = bytes_to_hex_upper(&pub_sign, &mut hexbuf);
+            uart_write_bytes(&hexbuf[..n_pk]);
+            uart_write_str("\n");
+
+            uart_write_str("PUB_ECDH=");
+            let n_pk = bytes_to_hex_upper(&pub_ecdh, &mut hexbuf);
             uart_write_bytes(&hexbuf[..n_pk]);
             uart_write_str("\n");
 
@@ -201,6 +328,152 @@ fn handle_challenge_hex(hex: &str) {
     }
 }
 
+fn handle_recv_share(cmd: &RecvShareCmd){
+    let se = match AteccSession::new(){
+        Ok(s) => s,
+        Err(rc) => {
+            uart_write_str(&format!("STATUS=ERR={}\n", rc));
+            return;
+        }
+    };
+
+    if cmd.slot < 10 || cmd.slot > 14{
+        uart_write_str("STATUS=ERR=bad_slot\n");
+        return;
+    }
+
+    // AAD vide pour cette v1. À durcir ulterieurement : binder volume_id || source_sn
+    // pour éviter les rejeux d'un wrap intercepte sur un autre slot.
+    let aad: [u8; 0] = [];
+
+    let volume_key = match unwrap_volume_key(&se, SLOT_ECDH, &cmd.source_pubkey, &cmd.wrapped, &aad){
+        Ok(k) => k,
+        Err(rc) => {
+            log::error!("recv_share: unwrap failed rc={}", rc);
+            uart_write_str(&format!("STATUS=ERR=unwrap={}\n", rc));
+            return;
+        }
+    };
+
+    if let Err(rc) = se.write_data_slot(cmd.slot, 0, &volume_key){
+        uart_write_str(&format!("STATUS=ERR={}\n", rc));
+        return;
+    }
+
+    log::info!("recv_share: slot={} unwrapped key[0..4]={:02X?}", cmd.slot, &volume_key[..4]);
+    uart_write_str("STATUS=OK\n");
+}
+
+fn handle_share(cmd: &ShareCmd){
+    // valider le slot cible
+    if cmd.target_slot < 10 || cmd.target_slot > 14{
+        uart_write_str("STATUS=ERR=bad_target_slot\n");
+        return;
+    }
+
+    // récupérer le SN du SE local
+    let se = match AteccSession::new(){
+        Ok(s) => s,
+        Err(rc) => {
+            uart_write_str(&format!("STATUS=ERR={}\n", rc));
+            return;
+        }
+    };
+    let self_sn = match se.serial_number(){
+        Ok(s) => s,
+        Err(rc) => {
+            uart_write_str(&format!("STATUS=ERR={}\n", rc));
+            return;
+        }
+    };
+
+    // trouver le volume dans la BK Table, vérifier ownership et capacité
+    let table = match get_global_bk_table(){
+        Some(t) => t,
+        None => {
+            uart_write_str("STATUS=ERR=no_bk_table\n");
+            return;
+        }
+    };
+    let mut idx_opt: Option<usize> = None;
+    for i in 0..table.num_volumes as usize{
+        if table.entries[i].volume_id == cmd.volume_id{
+            idx_opt = Some(i);
+            break;
+        }
+    }
+    let idx = match idx_opt{
+        Some(i) => i,
+        None => {
+            uart_write_str("STATUS=ERR=volume_not_found\n");
+            return;
+        }
+    };
+    let entry = &mut table.entries[idx];
+    if entry.owner_sn != self_sn{
+        uart_write_str("STATUS=ERR=not_owner\n");
+        return;
+    }
+    if entry.num_shared as usize >= MAX_SHARED{
+        uart_write_str("STATUS=ERR=shared_full\n");
+        return;
+    }
+
+    // vérifier qu'aucune entrée shared n'existe déjà pour ce target_sn (idempotence)
+    for s in 0..entry.num_shared as usize{
+        if entry.shared[s].sn == cmd.target_sn{
+            uart_write_str("STATUS=ERR=already_shared\n");
+            return;
+        }
+    }
+
+    // append du SharedAccess + on marque dirty la BK Table
+    let pos = entry.num_shared as usize;
+    entry.shared[pos] = SharedAccess{
+        sn: cmd.target_sn,
+        slot: cmd.target_slot as u8
+    };
+    entry.num_shared += 1;
+    mark_bk_table_dirty();
+
+    // dériver la clef du volume avec le volume_id
+    let volume_key = match derive_volume_key_hmac(&se, 9, cmd.volume_id){
+        Ok(k) => k,
+        Err(rc) => {
+            uart_write_str(&format!("STATUS=ERR={}\n", rc));
+            return;
+        }
+    };
+
+    // wrap via ECDH(slot1, target_pubkey) -> KEK -> AES-GCM
+    // AAD vide pour la v1 => à rajt : binder volume_id || target_sn
+    let aad: [u8; 0] = [];
+    let wrapped = match wrap_volume_key(&se, SLOT_ECDH, &cmd.target_pubkey, &volume_key, &aad){
+        Ok(w) => w,
+        Err(rc) => {
+            log::error!("share: wrap failed rc={}", rc);
+            uart_write_str(&format!("STATUS=ERR=wrap={}\n", rc));
+            return;
+        }
+    };
+
+    // émettre la réponse
+    let mut hexbuf = [0u8; 256];
+    uart_write_str("SN=");
+    let n_sn = bytes_to_hex_upper(&self_sn, &mut hexbuf);
+    uart_write_bytes(&hexbuf[..n_sn]);
+    uart_write_str("\n");
+
+    uart_write_str("WRAPPED=");
+    let n_w = bytes_to_hex_upper(&wrapped, &mut hexbuf);
+    uart_write_bytes(&hexbuf[..n_w]);
+    uart_write_str("\n");
+
+    uart_write_str("STATUS=OK\n");
+
+    log::info!("share: vol_idx={} target_sn={:02X?} target_slot={} key[0..4]={:02X?}", idx, &cmd.target_sn, cmd.target_slot, &volume_key[..4]);
+}
+
 pub fn uart_proto_task() -> Result<(), i32> {
     unsafe {
         let mut cfg: sys::uart_config_t = zeroed();
@@ -230,10 +503,12 @@ pub fn uart_proto_task() -> Result<(), i32> {
         ))?;
 
         let mut vol_cmd = VolumeCmd::new();
+        let mut recv_share_cmd = RecvShareCmd::new();
+        let mut share_cmd = ShareCmd::new();
 
         uart_write_str("READY\n");
 
-        let mut line: [u8; 160] = [0; 160];
+        let mut line: [u8; 256] = [0; 256];
         let mut idx: usize = 0;
 
         loop {
@@ -316,6 +591,69 @@ pub fn uart_proto_task() -> Result<(), i32> {
                             uart_write_str("STATUS=OK\n");
                             log::info!("action=init_format: volumes cleared, BK Table reset, format mode active");
                         }
+                        else if let Some(val) = msg.strip_prefix("recv_share_slot="){
+                            match val.parse::<u16>(){
+                                Ok(v) => {
+                                    recv_share_cmd.slot = v;
+                                    recv_share_cmd.fields |= 0x01;
+                                }
+                                Err(_) => uart_write_str("ERR=bad_slot\n"),
+                            }
+                        }
+                        else if let Some(hex) = msg.strip_prefix("recv_share_source_pubkey="){
+                            match hex_to_bytes_64(hex){
+                                Some(p) => {
+                                    recv_share_cmd.source_pubkey = p;
+                                    recv_share_cmd.fields |= 0x02;
+                                }
+                                None => uart_write_str("ERR=bad_source_pubkey\n"),
+                            }
+                        }
+                        else if let Some(hex) = msg.strip_prefix("recv_share_wrapped="){
+                            match hex_to_bytes_60(hex){
+                                Some(w) => {
+                                    recv_share_cmd.wrapped = w;
+                                    recv_share_cmd.fields |= 0x04;
+                                }
+                                None => uart_write_str("ERR=bad_wrapped\n"),
+                            }
+                        }
+                        else if let Some(hex) = msg.strip_prefix("share_volume_id="){
+                            match hex_to_bytes_16(hex){
+                                Some(v) => {
+                                    share_cmd.volume_id = v;
+                                    share_cmd.fields |= 0x01;
+                                }
+                                None => uart_write_str("ERR=bad_volume_id\n"),
+                            }
+                        }
+                        else if let Some(hex) = msg.strip_prefix("share_target_sn="){
+                            match hex_to_bytes_9(hex){
+                                Some(s) => {
+                                    share_cmd.target_sn = s;
+                                    share_cmd.fields |= 0x02;
+                                }
+                                None => uart_write_str("ERR=bad_target_sn\n"),
+                            }
+                        }
+                        else if let Some(hex) = msg.strip_prefix("share_target_pubkey="){
+                            match hex_to_bytes_64(hex){
+                                Some(p) => {
+                                    share_cmd.target_pubkey = p;
+                                    share_cmd.fields |= 0x04;
+                                }
+                                None => uart_write_str("ERR=bad_target_pubkey\n"),
+                            }
+                        }
+                        else if let Some(val) = msg.strip_prefix("share_target_slot="){
+                            match val.parse::<u16>(){
+                                Ok(v) => {
+                                    share_cmd.target_slot = v;
+                                    share_cmd.fields |= 0x08;
+                                }
+                                Err(_) => uart_write_str("ERR=bad_target_slot\n"),
+                            }
+                        }
                         else {
                             uart_write_str("ERR=unknown_cmd\n");
                         }
@@ -323,6 +661,16 @@ pub fn uart_proto_task() -> Result<(), i32> {
                         if vol_cmd.is_complete(){
                             handle_volume_create(&vol_cmd);
                             vol_cmd.reset();
+                        }
+
+                        if recv_share_cmd.is_complete(){
+                            handle_recv_share(&recv_share_cmd);
+                            recv_share_cmd.reset();
+                        }
+
+                        if share_cmd.is_complete(){
+                            handle_share(&share_cmd);
+                            share_cmd.reset();
                         }
 
                         idx = 0;

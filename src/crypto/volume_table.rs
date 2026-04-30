@@ -213,13 +213,40 @@ pub fn restore_volumes_from_bk_table(table: &BkTable, disk: &mut EncryptedDisk) 
     }
 
     let se = AteccSession::new()?;
+    let self_sn = se.serial_number()?;
+
     for i in 0..table.num_volumes as usize{
         let entry = &table.entries[i];
         log::info!("restore vol {} volume_id={:02X?}", i, &entry.volume_id);
-        let key = derive_volume_key_hmac(&se, 9, entry.volume_id)?;
-        log::info!("restore vol {} key[0..4] = {:02X?}", i, &key[..4]);
-        disk.add_volume(entry.lba_start, entry.lba_end, &key)?;
-        log::info!("volume {} restaure lba {}..{}", i, entry.lba_start, entry.lba_end);
+
+        // Cas 1: on est le owner => dérive la clef via slot 9 + volume_id
+        if entry.owner_sn == self_sn{
+            let key = derive_volume_key_hmac(&se, 9, entry.volume_id)?;
+            log::info!("    vol {} OWNER, key[0..4]={:02X?}", i, &key[..4]);
+            disk.add_volume(entry.lba_start, entry.lba_end, &key)?;
+            continue;
+        }
+
+        // Cas 2: on est dans la liste shared => lit la clef depuis le slot ATECC indiqué
+        let mut found_shared = false;
+        for s in 0..entry.num_shared as usize{
+            if entry.shared[s].sn == self_sn{
+                let mut key = [0u8; 32];
+                se.read_data_slot(entry.shared[s].slot as u16, 0, 32, &mut key)?;
+                log::info!("  vol {} SHARED slot={} key[0..4]={:02X?}", i, entry.shared[s].slot, &key[..4]); 
+                disk.add_volume(entry.lba_start, entry.lba_end, &key)?;
+                found_shared = true;
+                break;
+            }
+        }
+
+        // Cas 3: pas autorisé, on enregistre rien, l'I/O retombera sur default_gcm
+        // clef constante connue de toutes les BindKeys
+        // les données apparaitront comme aléatoire
+        if !found_shared{
+            log::info!("    vol {} NO_ACCESS (sn pas dans owner ni shared)", i);
+        }
+        
     }
 
     Ok(())

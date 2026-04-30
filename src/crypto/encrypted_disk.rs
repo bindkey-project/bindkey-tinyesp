@@ -91,7 +91,7 @@ impl EncryptedDisk{
     
     pub fn log_volume_table(&self){                                                                                                                                                                                                          
         log::info!("=== Volume Table ({} volumes) ===", self.num_volumes);
-        log::info!("  vol0 [default] → clé bindkey-vol-0001");                                                                                                                                                                                
+        log::info!("  vol0 [default] → constant key (cross-device)");
         for i in 0..self.num_volumes{                                                                                                                                                                                                        
             if let Some(ref v) = self.volumes[i]{                                                                                                                                                                                            
                 log::info!("  vol{} lba={}..{}", i + 1, v.lba_start, v.lba_end);                                                                                                                                                              

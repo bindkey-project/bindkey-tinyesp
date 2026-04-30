@@ -150,27 +150,6 @@ fn main() {
         table
     };
     
-    // bloc qui servait avant le partage de volumes
-    /*let (gpt_key, vol_key) = match(|| -> Result<([u8; 32], [u8; 32]), i32>{
-        let se = AteccSession::new()?;
-        let gpt_key = derive_volume_key_hmac(&se, 9, GPT_VOLUME_ID)?;
-        let vol_id: [u8; 16] = *b"bindkey-vol-0001";
-        let vol_key = derive_volume_key_hmac(&se, 9, vol_id)?;
-        Ok((gpt_key, vol_key))
-    })(){
-        Ok(k) => {
-            log::info!("Derived GPT key and volume key from SE ok");
-            k
-        },
-        Err(err) => {
-            log::error!("derive_volume_key_from_hmac failed {} ({})", 
-                        err, 
-                        unsafe{core::ffi::CStr::from_ptr(esp_err_to_name(err)).to_string_lossy()});
-            return;
-        }
-    };
-    let _gpt_key = gpt_key;*/
-
     match AteccSession::new() {
         Ok(se) => {
             if let Err(err) = provision_config_zone(&se) {
@@ -193,11 +172,22 @@ fn main() {
                 Ok(()) => log::info!("SE: slot 8 write OK — WriteConfig=Always confirmé"),
                 Err(rc) => log::error!("SE: slot 8 write FAILED rc={} — PROBLÈME WriteConfig", rc),
             }*/
-            // Lecture config zone pour vérifier SlotConfig[0] et KeyConfig[0]
+            // Lecture config zone pour vérifier SlotConfig[0/1], KeyConfig[0/1], ChipOptions
             match se.read_config_zone() {
                 Ok(cfg) => {
                     log::info!("SE SlotConfig[0] (bytes 20-21) = {:02X?}", &cfg[20..22]);
+                    log::info!("SE SlotConfig[1] (bytes 22-23) = {:02X?}", &cfg[22..24]);
                     log::info!("SE KeyConfig[0]  (bytes 96-97) = {:02X?}", &cfg[96..98]);
+                    log::info!("SE KeyConfig[1]  (bytes 98-99) = {:02X?}", &cfg[98..100]);
+                    log::info!("SE ChipOptions  (bytes 90-91) = {:02X?}", &cfg[90..92]);
+                    log::info!("SE ChipMode     (byte 19)     = {:02X?}", cfg[19]);
+                    // Détail ChipOptions (byte 90 low):
+                    //   bit 0 = POST enable, bit 1 = IO Protection Key Enable
+                    //   bit 2 = KDF AES Enable, bit 3 = ECDH Output Protection
+                    let chipopts_lo = cfg[90];
+                    log::info!("  ChipOptions.IOProt={} ECDH_Prot={}",
+                        (chipopts_lo >> 1) & 1,
+                        (chipopts_lo >> 3) & 1);
                 }
                 Err(rc) => log::error!("SE read_config_zone failed rc={}", rc),
             }
@@ -210,20 +200,47 @@ fn main() {
         }
     }
 
-    let vol_key = match(|| -> Result<[u8; 32], i32>{
+    // === Pré-test ECDH round-trip (à retirer après validation) ===
+    // Wrap puis unwrap d'une clef AAA...A en utilisant la pubkey ECDH locale comme peer_pub.
+    // Si OK : atcab_ecdh + wrap_volume_key + unwrap_volume_key fonctionnent.
+    match (|| -> Result<(), i32> {
         let se = AteccSession::new()?;
-        let vol_id: [u8; 16] = *b"bindkey-vol-0001";
-        derive_volume_key_hmac(&se, 9, vol_id)
-    })(){
-        Ok(k) => {
-            log::info!("default vol_key[0..4] = {:02X?}", &k[..4]);
-            k
-        },
-        Err(err) => {
-            log::error!("derive_volume_key failed {}", err);
-            return;
+
+        // Diagnostic : état de lock des deux zones
+        let (cfg_locked, data_locked) = se.lock_status()?;
+        log::info!("ECDH test: lock_status cfg={} data={}", cfg_locked, data_locked);
+
+        let my_pub = se.get_pubkey(1)?;
+        log::info!("ECDH test: my_pub[0..4]={:02X?}", &my_pub[..4]);
+
+        let original_key = [0xAAu8; 32];
+        let aad: [u8; 0] = [];
+
+        let wrapped = wrap_volume_key(&se, 1, &my_pub, &original_key, &aad)?;
+        log::info!("ECDH test: wrapped[0..8]={:02X?}", &wrapped[..8]);
+
+        let recovered = unwrap_volume_key(&se, 1, &my_pub, &wrapped, &aad)?;
+        log::info!("ECDH test: recovered[0..4]={:02X?}", &recovered[..4]);
+
+        if original_key == recovered {
+            log::info!("ECDH round-trip OK");
+        } else {
+            log::error!("ECDH round-trip MISMATCH");
         }
-    };
+        Ok(())
+    })() {
+        Ok(()) => {}
+        Err(rc) => log::error!("ECDH round-trip failed rc={}", rc),
+    }
+
+    // Default key: identique sur toutes les BindKeys → la MBR/GPT et toute zone hors
+    // BkTable est lisible cross-device. Aucune protection cryptographique réelle ici
+    // (la BkTable au LBA 0 leake déjà la layout des volumes en clair). Les VRAIS volumes
+    // déclarés dans la BkTable utilisent leur propre clé via derive_volume_key_hmac (owner)
+    // ou via un slot ATECC (shared).
+    const DEFAULT_VOLUME_KEY: [u8; 32] = *b"bindkey-default-key-shared!!!!v1";
+    let vol_key = DEFAULT_VOLUME_KEY;
+    log::info!("default vol_key[0..4] = {:02X?} (constant)", &vol_key[..4]);
 
     let mut disk_box: Box<EncryptedDisk> = match EncryptedDisk::new(&vol_key){
         Ok(d) => Box::new(d),
