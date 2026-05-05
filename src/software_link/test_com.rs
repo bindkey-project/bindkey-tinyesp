@@ -233,10 +233,6 @@ fn handle_enroll() {
         Ok((sn, pub_sign, pub_ecdh))
     })() {
         Ok((sn, pub_sign, pub_ecdh)) => {
-            // === Fingerprint enrollment disabled for tests with single sensor ===
-            // Décommenter pour réactiver l'enrôlement biométrique du capteur lors de `enroll` UART.
-            log::warn!("handle_enroll: fingerprint enrollment BYPASSED (test mode)");
-            /*
             let enroll_result = if crate::USE_R503 == 1 {
                 r503::enroll_once()
             } else {
@@ -246,7 +242,7 @@ fn handle_enroll() {
                 uart_write_str(&format!("ERR=enroll_failed={}\n", rc));
                 return;
             }
-            */
+            
 
             let mut hexbuf = [0u8; 256];
 
@@ -297,17 +293,13 @@ fn handle_challenge_hex(hex: &str) {
             return;
         }
     };
-
-    // === Fingerprint check disabled for tests with single sensor ===
-    // Décommenter le bloc original ci-dessous et supprimer le stub pour réactiver le gate biométrique.
-    log::warn!("handle_challenge_hex: fingerprint check BYPASSED (test mode)");
-    /*
+    
     let fp_result = if crate::USE_R503 == 1 {
         r503::test_fingerprint_once()
     } else {
         test_fingerprint_once()
     };
-    */
+    
     let fp_result: Result<(), i32> = Ok(());
     match fp_result {
         Ok(()) => {
@@ -626,14 +618,12 @@ pub fn uart_proto_task() -> Result<(), i32> {
                                 None => uart_write_str("ERR=bad_wrapped\n"),
                             }
                         }
-                        else if let Some(hex) = msg.strip_prefix("share_volume_id="){
-                            match hex_to_bytes_16(hex){
-                                Some(v) => {
-                                    share_cmd.volume_id = v;
-                                    share_cmd.fields |= 0x01;
-                                }
-                                None => uart_write_str("ERR=bad_volume_id\n"),
-                            }
+                        else if let Some(val) = msg.strip_prefix("share_volume_id="){
+                            let bytes = val.as_bytes();
+                            let len = bytes.len().min(16);
+                            share_cmd.volume_id = [0u8; 16];
+                            share_cmd.volume_id[..len].copy_from_slice(&bytes[..len]);
+                            share_cmd.fields |= 0x01;
                         }
                         else if let Some(hex) = msg.strip_prefix("share_target_sn="){
                             match hex_to_bytes_9(hex){
