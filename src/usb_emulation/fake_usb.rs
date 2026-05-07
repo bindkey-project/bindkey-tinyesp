@@ -27,9 +27,6 @@ static ACTIVE_BS: AtomicU32 = AtomicU32::new(BLOCK_SIZE as u32);
 static ACTIVE_BC: AtomicU32 = AtomicU32::new(BLOCK_COUNT);
 static MEDIA_WAS_READY: AtomicU32 = AtomicU32::new(0);
 static DISK_LOGGED: AtomicU32 = AtomicU32::new(0);
-/// Set to 1 once we log "hiding disk — no volumes configured" to avoid log spam.
-/// Reset to 0 when volumes become available so the "first Ready" log fires again.
-static GATE_LOGGED: AtomicU32 = AtomicU32::new(0);
 /// Set to true by reset_disk_state(). Consumed in TUR once the gate lifts (volumes ready):
 /// signals UNIT_ATTENTION MEDIUM_CHANGED so the OS discards its cached disk state.
 static NEEDS_UNIT_ATTENTION: AtomicBool = AtomicBool::new(false);
@@ -55,7 +52,6 @@ pub fn reset_disk_state() {
     MEDIA_WAS_READY.store(0, Ordering::Relaxed);
     DISK_LOGGED.store(0, Ordering::Relaxed);
     BD0_CONSECUTIVE.store(0, Ordering::Relaxed);
-    GATE_LOGGED.store(0, Ordering::Relaxed);
     BK_TABLE_RELOAD_PENDING.store(false, Ordering::Relaxed);
     BK_TABLE_LATE_LOAD_DONE.store(false, Ordering::Relaxed);
     NEEDS_UNIT_ATTENTION.store(true, Ordering::Relaxed);
@@ -68,7 +64,6 @@ pub fn reset_disk_state() {
 /// The disk remains visible to the OS during the format session.
 pub fn enter_format_mode() {
     DISK_FORMATTING.store(true, Ordering::Relaxed);
-    GATE_LOGGED.store(0, Ordering::Relaxed);
     log::info!("enter_format_mode: gate bypassed, disk stays visible for force_format");
 }
 
@@ -84,6 +79,14 @@ pub fn exit_format_mode() {
 
 pub fn is_disk_formatting() -> bool {
     DISK_FORMATTING.load(Ordering::Relaxed)
+}
+
+/// Called by main.rs after the boot retry loop, regardless of read success.
+/// Disables the lazy reload triggered from test_unit_ready_cb so the OS isn't
+/// blocked NOT_READY for the SCSI spin-up timeout when the BkTable can't be read
+/// at boot (no/uninitialized USB key).
+pub fn mark_bk_table_late_load_done() {
+    BK_TABLE_LATE_LOAD_DONE.store(true, Ordering::Relaxed);
 }
 
 extern "C" {
@@ -264,28 +267,10 @@ pub extern "C" fn tud_msc_test_unit_ready_cb(_lun: u8) -> bool{
                 }
             }
 
-            // Gate: if the BK Table was explicitly initialized (valid magic on disk)
-            // but has no volumes, the user ran action=init_format and hasn't configured
-            // volumes yet — keep the disk hidden from the OS until UART completes the setup.
-            // This prevents the OS from formatting with the wrong/missing key.
-            //
-            // Exception: while DISK_FORMATTING is set (active format session started by
-            // action=init_format), the gate is bypassed so the OS can still write the msdos
-            // partition table via force_format before volumes are declared.
-            if let Some(table) = get_global_bk_table() {
-                if table.initialized && table.num_volumes == 0
-                    && !DISK_FORMATTING.load(Ordering::Relaxed)
-                {
-                    if GATE_LOGGED.swap(1, Ordering::Relaxed) == 0 {
-                        log::warn!("TUR: BkTable wiped (0 volumes) — hiding disk from OS. \
-                                    Send volume_name/volume_id/lba_start/lba_end via UART first.");
-                    }
-                    unsafe { tud_msc_set_sense(_lun, SCSI_SENSE_NOT_READY, SCSI_ASC_LUN_NOT_READY, SCSI_ASCQ_BECOMING_READY); }
-                    return false;
-                }
-            }
-            // Volumes exist (or first boot with no BK Table yet) — disk is visible.
-            GATE_LOGGED.store(0, Ordering::Relaxed);
+            // Note : ancien gate (initialized && num_volumes==0) retiré.
+            // Avec la default_gcm constante cross-device, l'OS peut découvrir un disque
+            // sans BkTable peuplée sans risque de corruption — le soft envoie ensuite
+            // action=init_format / volume_create via UART pour configurer le device.
 
             // Signal UNIT_ATTENTION MEDIUM_CHANGED once after init_format+volume_create:
             // forces the OS to discard any cached disk state and re-read the partition table.

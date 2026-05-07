@@ -130,8 +130,31 @@ fn main() {
 
     set_global_spi(&mut spi);
 
-    // Retry : le slave SPI peut prendre quelques secondes à démarrer après le boot
-    let bk_table = {
+    // Check media presence avant de tenter quoi que ce soit qui dépend du média.
+    // Si pas de clé USB branchée côté slave, skip le BkTable read et le warm-up :
+    // ils tomberaient sur du junk (le slave répond avec du bruit quand il n'a pas
+    // de disque) → CRC fail / timeouts inutiles.
+    let mut media_ready = false;
+    for attempt in 0..5u32 {
+        match spi.get_status() {
+            Ok((_, 2)) => {
+                log::info!("Media ready at boot (attempt {})", attempt);
+                media_ready = true;
+                break;
+            }
+            Ok((_, bd)) => {
+                log::info!("Media not ready at boot (bd={}, attempt {})", bd, attempt);
+                std::thread::sleep(std::time::Duration::from_millis(500));
+            }
+            Err(e) => {
+                log::warn!("get_status attempt {} failed err={}", attempt, e);
+                std::thread::sleep(std::time::Duration::from_millis(500));
+            }
+        }
+    }
+
+    let bk_table = if media_ready {
+        // Retry : le slave SPI peut prendre quelques secondes à démarrer après le boot
         let mut table = BkTable::new();
         for attempt in 0..5u32 {
             match read_bk_table_from_storage(&mut spi) {
@@ -149,8 +172,32 @@ fn main() {
             }
         }
         table
+    } else {
+        log::info!("Skipping BK Table read — no media at boot");
+        BkTable::new()
     };
-    
+
+    mark_bk_table_late_load_done();
+
+    // Warm-up SPI uniquement si on a un média : permet au slave de se synchroniser
+    // avant que TinyUSB ne démarre. Sinon le 1er capacity_cb appelé par l'OS pendant
+    // l'énumération SCSI peut tomber sur un SPI pas encore prêt → fallback 4096
+    // secteurs (2 MB) commit définitivement par l'OS.
+    if media_ready {
+        for i in 0..5u32 {
+            match spi.get_capacity() {
+                Ok((bs, bc)) if bs != 0 && bc != 0 => {
+                    log::info!("SPI warm-up ok (bc={} bs={})", bc, bs);
+                    break;
+                }
+                _ => {
+                    log::warn!("SPI warm-up attempt {} not ready, retrying...", i);
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+                }
+            }
+        }
+    }
+
     match AteccSession::new() {
         Ok(se) => {
             if let Err(err) = provision_config_zone(&se) {

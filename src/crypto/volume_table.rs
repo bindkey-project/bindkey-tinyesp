@@ -85,6 +85,19 @@ impl BkTable{
         Ok(idx)
     }
 
+    pub fn remove_volume(&mut self, idx: usize) -> Result<(), i32>{
+        let n = self.num_volumes as usize;
+        if idx >= n{
+            return Err(ESP_ERR_INVALID_ARG);
+        }
+        for j in idx..(n - 1){
+            self.entries[j] = self.entries[j + 1];
+        }
+        self.entries[n - 1] = VolumeEntry::default();
+        self.num_volumes -= 1;
+        Ok(())
+    }
+
     pub fn find_volume_for_lba(&self, lba: u32) -> Option<usize>{
         for i in 0..self.num_volumes as usize{
             let e = &self.entries[i];

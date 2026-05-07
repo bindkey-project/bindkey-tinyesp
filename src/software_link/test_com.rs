@@ -569,6 +569,20 @@ pub fn uart_proto_task() -> Result<(), i32> {
                             }
                         }
                         else if msg == "action=init_format"{
+                            if let Some(table) = get_global_bk_table(){
+                                if table.num_volumes > 0{
+                                    uart_write_str("TO_DEL=");
+                                    for i in 0..table.num_volumes as usize{
+                                        let vid = &table.entries[i].volume_id;
+                                        let len = vid.iter().position(|&b| b == 0).unwrap_or(16);
+                                        uart_write_bytes(&vid[..len]);
+                                        if (i + 1) < table.num_volumes as usize{
+                                            uart_write_str(";");
+                                        }
+                                    }
+                                    uart_write_str("\n");
+                                }
+                            }
                             // Force the host to drop stale partition/media state before
                             // it writes a new msdos table through the format bypass.
                             reset_disk_state();
@@ -651,6 +665,13 @@ pub fn uart_proto_task() -> Result<(), i32> {
                                 }
                                 Err(_) => uart_write_str("ERR=bad_target_slot\n"),
                             }
+                        }
+                        else if let Some(val) = msg.strip_prefix("delete_volume="){
+                            let bytes = val.as_bytes();
+                            let len = bytes.len().min(16);
+                            let mut volume_id = [0u8; 16];
+                            volume_id[..len].copy_from_slice(&bytes[..len]);
+                            handle_delete_volume(&volume_id);
                         }
                         else {
                             uart_write_str("ERR=unknown_cmd\n");
@@ -775,4 +796,69 @@ fn handle_volume_create(cmd: &VolumeCmd){
     if was_formatting {
         exit_format_mode();
     }
+}
+
+fn handle_delete_volume(volume_id: &[u8; 16]){
+    let se = match AteccSession::new(){
+        Ok(s) => s,
+        Err(rc) => {
+            uart_write_str(&format!("STATUS=ERR={}\n", rc));
+            return;
+        }
+    };
+    let self_sn = match se.serial_number(){
+        Ok(s) => s,
+        Err(rc) => {
+            uart_write_str(&format!("STATUS=ERR={}\n", rc));
+            return;
+        }
+    };
+
+    let table = match get_global_bk_table(){
+        Some(t) => t,
+        None => {
+            uart_write_str("STATUS=ERR=no_bk_table\n");
+            return;
+        }
+    };
+
+    let mut idx_opt: Option<usize> = None;
+    for i in 0..table.num_volumes as usize{
+        if table.entries[i].volume_id == *volume_id{
+            idx_opt = Some(i);
+            break;
+        }
+    }
+    let idx = match idx_opt{
+        Some(i) => i,
+        None => {
+            uart_write_str("STATUS=ERR=volume_not_found\n");
+            return;
+        }
+    };
+
+    if table.entries[idx].owner_sn != self_sn{
+        uart_write_str("STATUS=ERR=not_owner\n");
+        return;
+    }
+
+    if let Err(rc) = table.remove_volume(idx){
+        uart_write_str(&format!("STATUS=ERR=remove={}\n", rc));
+        return;
+    }
+    mark_bk_table_dirty();
+
+    // rebuild disk mapping
+    if let Some(disk) = get_global_disk(){
+        disk.clear_volumes();
+        if let Err(rc) = restore_volumes_from_bk_table(table, disk){
+            log::error!("delete_volume: restore failed rc={}", rc);
+            uart_write_str(&format!("STATUS=ERR=restore={}\n", rc));
+            return;
+        }
+    }
+
+    uart_write_str("STATUS=OK\n");
+    log::info!("delete_volume: removed idx={} volume_id={:02X?}", idx, volume_id);
+
 }
