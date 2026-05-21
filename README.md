@@ -4,7 +4,7 @@
 
 <h1 align="center">BindKey</h1>
 
-<p align="center"><i>Proxy USB chiffré transparent — biométrie locale, zero-knowledge, partage collaboratif</i></p>
+<p align="center"><i>Security at your fingertip</i></p>
 
 ---
 
