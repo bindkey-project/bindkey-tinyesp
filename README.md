@@ -1,22 +1,37 @@
 <p align="center">
-  <img src="assets/logo-bindkey.png" alt="Logo BindKey" width="450"/>
+  <img src="assets/logo-bindkey.png" alt="Logo BindKey" width="600"/>
 </p>
 
 <h1 align="center">BindKey</h1>
 
-**BindKey** est un proxy USB chiffré qui se branche entre l'ordinateur et un
-support de stockage externe (clé USB, SSD, lecteur SD). Toutes les données qui
-transitent par BindKey sont scellées et chiffrées en AES-256-GCM par un
-microcontrôleur sécurisé ; elles ne sont déchiffrées que pour les utilisateurs
-légitimes, authentifiés biométriquement, dont la BindKey détient les droits
-cryptographiques sur le volume concerné. Toute modification effectuée en dehors
-de l'environnement BindKey rend le contenu illisible. La solution fonctionne
-**hors cloud**, sans driver côté hôte, et permet en complément à un logiciel
-desktop et à un serveur de gérer la délégation d'accès entre BindKeys d'une
-même organisation pour un partage collaboratif sécurisé.
+<p align="center"><i>Proxy USB chiffré transparent — biométrie locale, zero-knowledge, partage collaboratif</i></p>
 
-Ce repo contient le firmware **master** (ESP32-S3 N°1) — l'une des deux MCU
-qui composent BindKey.
+---
+
+## Présentation globale du projet BindKey
+
+**BindKey** est une solution de cybersécurité matérielle qui résout le compromis entre la sécurité des données hors-ligne et le besoin de collaboration en entreprise. Le boîtier se place entre le PC et un support de stockage standard (clé USB, SSD, lecteur SD) et agit comme un **Man-in-the-Middle légitime** : toutes les données qui le traversent sont scellées et chiffrées à la volée en **AES-256-GCM** par un microcontrôleur sécurisé, et ne sont déchiffrées que pour les utilisateurs authentifiés **biométriquement** dont la BindKey détient les droits sur le volume. Toute modification effectuée en dehors de l'environnement BindKey rend le contenu illisible. Le tout fonctionne **hors cloud**, **sans driver hôte**, sur Windows / Linux / macOS.
+
+### Les trois piliers du projet
+
+1. **Le proxy matériel BindKey** — le boîtier physique qui assure l'authentification biométrique locale, la dérivation des clés via un secure element ATECC608A, et le chiffrement à la volée des données. Composé de deux microcontrôleurs ESP32-S3 :
+   - un **master** (émulation USB MSC + biométrie + crypto AES-GCM + élément sécurisé) — dépôt [`bindkey-tinyesp`](https://github.com/bindkey-project/bindkey-tinyesp) **← ce dépôt**
+   - un **slave** (pilotage du vrai média physique en USB Host) — dépôt [`bindkey-esp`](https://github.com/bindkey-project/bindkey-esp)
+2. **Un serveur backend (API)** — dépôt [`bindkey-server`](https://github.com/bindkey-project/bindkey-server) — gère les identités publiques des utilisateurs et orchestre la délégation d'accès entre BindKeys en mode *Zero-Knowledge* : seules des clés enveloppées (wrapped via ECDH) circulent sur le réseau, jamais la clé volume en clair.
+3. **Le logiciel de bureau** — dépôt [`bindkey-software`](https://github.com/bindkey-project/bindkey-software) — application Rust qui pilote la BindKey via UART et offre l'interface graphique : création / suppression de volumes, partage avec un collègue, formatage, réinitialisation, et toute opération d'administration nécessitant la présence physique de la clé.
+
+### Fonctionnalités principales
+
+- **Chiffrement transparent** à la volée — aucun driver côté hôte, comportement de clé USB MSC standard
+- **Authentification biométrique** locale par empreinte digitale, hardware-gated et anti-rejeu
+- **Intégrité prouvable** — toute modification hors BindKey rend les données illisibles (tag AES-GCM)
+- **Partage collaboratif** entre BindKeys d'une même organisation via ECDH P-256 (Zero-Knowledge)
+- **Délégation d'enrôlement** — un administrateur peut accorder un privilège *Enroller* à un responsable d'équipe
+- **Gestion du cycle de vie** — révocation à distance, restauration via code de recovery, wipe & réassignation
+- **Audit log** centralisé tamper-evident (conformité GDPR et traçabilité forensic)
+- **Maintenance air-gapped** — transport sécurisé de payloads vers des systèmes isolés (OT, industriels)
+
+Ce dépôt contient le firmware **master** (ESP32-S3 N°1) — l'une des deux MCU qui composent le proxy matériel BindKey.
 
 ---
 
@@ -180,7 +195,7 @@ sudo apt install -y git wget flex bison gperf python3 python3-pip python3-venv \
 
 ```bash
 # Cloner le repo
-git clone <url> bindkey-tinyesp
+git clone https://github.com/bindkey-project/bindkey-tinyesp.git
 cd bindkey-tinyesp
 
 # S'assurer que la toolchain ESP est active
