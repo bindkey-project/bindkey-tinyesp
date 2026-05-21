@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/logo-bindkey.png" alt="Logo BindKey" width="600"/>
+  <img src="assets/logo-bindkey.png" alt="Logo BindKey" width="450"/>
 </p>
 
 <h1 align="center">BindKey</h1>
