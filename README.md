@@ -252,7 +252,7 @@ src/
 
 ## Repo lié
 
-[`bindkey-esp`](../bindkey-esp) — firmware de la seconde MCU, SPI slave +
+[`bindkey-esp`](https://github.com/bindkey-project/bindkey-esp) — firmware de la seconde MCU, SPI slave +
 USB Host. Toute modification du protocole SPI (header, taille de payload,
 séquence du handshake READY, CRC32) **doit être coordonnée** entre les deux
 repos.
