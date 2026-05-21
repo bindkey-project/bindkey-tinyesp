@@ -1,3 +1,25 @@
+<p align="center">
+  <img src="assets/logo-bindkey.png" alt="Logo BindKey" width="450"/>
+</p>
+
+<h1 align="center">BindKey</h1>
+
+**BindKey** est un proxy USB chiffré qui se branche entre l'ordinateur et un
+support de stockage externe (clé USB, SSD, lecteur SD). Toutes les données qui
+transitent par BindKey sont scellées et chiffrées en AES-256-GCM par un
+microcontrôleur sécurisé ; elles ne sont déchiffrées que pour les utilisateurs
+légitimes, authentifiés biométriquement, dont la BindKey détient les droits
+cryptographiques sur le volume concerné. Toute modification effectuée en dehors
+de l'environnement BindKey rend le contenu illisible. La solution fonctionne
+**hors cloud**, sans driver côté hôte, et permet en complément à un logiciel
+desktop et à un serveur de gérer la délégation d'accès entre BindKeys d'une
+même organisation pour un partage collaboratif sécurisé.
+
+Ce repo contient le firmware **master** (ESP32-S3 N°1) — l'une des deux MCU
+qui composent BindKey.
+
+---
+
 # bindkey-tinyesp
 
 BindKey - Master Project - ESP32#1 Code Repository
