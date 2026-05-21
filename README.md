@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/logo-bindkey.png" alt="Logo BindKey" width="450"/>
+  <img src="assets/logo-bindkey.png" alt="BindKey Logo" width="450"/>
 </p>
 
 <h1 align="center">BindKey</h1>
@@ -8,30 +8,30 @@
 
 ---
 
-## Présentation globale du projet BindKey
+## Project overview
 
-**BindKey** est une solution de cybersécurité matérielle qui résout le compromis entre la sécurité des données hors-ligne et le besoin de collaboration en entreprise. Le boîtier se place entre le PC et un support de stockage standard (clé USB, SSD, lecteur SD) et agit comme un **Man-in-the-Middle légitime** : toutes les données qui le traversent sont scellées et chiffrées à la volée en **AES-256-GCM** par un microcontrôleur sécurisé, et ne sont déchiffrées que pour les utilisateurs authentifiés **biométriquement** dont la BindKey détient les droits sur le volume. Toute modification effectuée en dehors de l'environnement BindKey rend le contenu illisible. Le tout fonctionne **hors cloud**, **sans driver hôte**, sur Windows / Linux / macOS.
+**BindKey** is a hardware cybersecurity solution that resolves the trade-off between offline data security and the need for enterprise collaboration. The device sits between the host PC and a standard storage medium (USB stick, SSD, SD reader) and acts as a **legitimate Man-in-the-Middle**: every byte that flows through it is sealed and encrypted on-the-fly in **AES-256-GCM** by a secure microcontroller, and is decrypted only for users who have been **biometrically** authenticated and whose BindKey holds the access rights to the target volume. Any modification performed outside the BindKey environment makes the content unreadable. The whole system works **off-cloud**, **with no host driver**, on Windows / Linux / macOS.
 
-### Les trois piliers du projet
+### The three pillars of the project
 
-1. **Le proxy matériel BindKey** — le boîtier physique qui assure l'authentification biométrique locale, la dérivation des clés via un secure element ATECC608A, et le chiffrement à la volée des données. Composé de deux microcontrôleurs ESP32-S3 :
-   - un **master** (émulation USB MSC + biométrie + crypto AES-GCM + élément sécurisé) — dépôt [`bindkey-tinyesp`](https://github.com/bindkey-project/bindkey-tinyesp) **← ce dépôt**
-   - un **slave** (pilotage du vrai média physique en USB Host) — dépôt [`bindkey-esp`](https://github.com/bindkey-project/bindkey-esp)
-2. **Un serveur backend (API)** — dépôt [`bindkey-server`](https://github.com/bindkey-project/bindkey-server) — gère les identités publiques des utilisateurs et orchestre la délégation d'accès entre BindKeys en mode *Zero-Knowledge* : seules des clés enveloppées (wrapped via ECDH) circulent sur le réseau, jamais la clé volume en clair.
-3. **Le logiciel de bureau** — dépôt [`bindkey-software`](https://github.com/bindkey-project/bindkey-software) — application Rust qui pilote la BindKey via UART et offre l'interface graphique : création / suppression de volumes, partage avec un collègue, formatage, réinitialisation, et toute opération d'administration nécessitant la présence physique de la clé.
+1. **The BindKey hardware proxy** — the physical box that handles local biometric authentication, key derivation through an ATECC608A secure element, and on-the-fly encryption of the data. Made of two ESP32-S3 microcontrollers:
+   - a **master** (USB MSC emulation + biometrics + AES-GCM crypto + secure element) — repo [`bindkey-tinyesp`](https://github.com/bindkey-project/bindkey-tinyesp) **← this repo**
+   - a **slave** (drives the real physical media in USB Host mode) — repo [`bindkey-esp`](https://github.com/bindkey-project/bindkey-esp)
+2. **A backend server (API)** — repo [`bindkey-server`](https://github.com/bindkey-project/bindkey-server) — manages users' public identities and orchestrates access delegation between BindKeys in *Zero-Knowledge* mode: only wrapped keys (ECDH-wrapped) ever travel over the network, never the plaintext volume key.
+3. **The desktop software** — repo [`bindkey-software`](https://github.com/bindkey-project/bindkey-software) — Rust application that drives the BindKey through UART and provides the GUI: volume creation / deletion, sharing with a colleague, formatting, reset, and any administration operation that requires the physical presence of the key.
 
-### Fonctionnalités principales
+### Main features
 
-- **Chiffrement transparent** à la volée — aucun driver côté hôte, comportement de clé USB MSC standard
-- **Authentification biométrique** locale par empreinte digitale, hardware-gated et anti-rejeu
-- **Intégrité prouvable** — toute modification hors BindKey rend les données illisibles (tag AES-GCM)
-- **Partage collaboratif** entre BindKeys d'une même organisation via ECDH P-256 (Zero-Knowledge)
-- **Délégation d'enrôlement** — un administrateur peut accorder un privilège *Enroller* à un responsable d'équipe
-- **Gestion du cycle de vie** — révocation à distance, restauration via code de recovery, wipe & réassignation
-- **Audit log** centralisé tamper-evident (conformité GDPR et traçabilité forensic)
-- **Maintenance air-gapped** — transport sécurisé de payloads vers des systèmes isolés (OT, industriels)
+- **Transparent on-the-fly encryption** — no host driver, behaves as a standard USB MSC drive
+- **Local biometric authentication** by fingerprint, hardware-gated and replay-protected
+- **Provable integrity** — any change made outside the BindKey makes the data unreadable (AES-GCM tag)
+- **Collaborative sharing** between BindKeys of the same organization via ECDH P-256 (Zero-Knowledge)
+- **Delegated enrollment** — an administrator can grant *Enroller* privilege to a team leader
+- **Lifecycle management** — remote revocation, recovery-code-based restoration, wipe & reassignment
+- **Tamper-evident centralized audit log** (GDPR compliance and forensic traceability)
+- **Air-gapped maintenance** — secure transport of payloads to isolated systems (OT, industrial)
 
-Ce dépôt contient le firmware **master** (ESP32-S3 N°1) — l'une des deux MCU qui composent le proxy matériel BindKey.
+This repository contains the **master** firmware (ESP32-S3 #1) — one of the two MCUs that make up the BindKey hardware proxy.
 
 ---
 
@@ -39,35 +39,35 @@ Ce dépôt contient le firmware **master** (ESP32-S3 N°1) — l'une des deux MC
 
 BindKey - Master Project - ESP32#1 Code Repository
 
-> Firmware Rust de BindKey **master** — ESP32-S3 N°1 du projet BindKey.
+> Rust firmware for the BindKey **master** — ESP32-S3 #1 of the BindKey project.
 
-`bindkey-tinyesp` est l'un des deux firmwares qui composent le proxy USB chiffré transparent
-**BindKey**. Cette MCU est celle qui parle directement au PC hôte : elle émule
-une clé USB Mass Storage standard, intercepte chaque lecture / écriture,
-authentifie biométriquement l'utilisateur, dérive les clés des volumes depuis un
-Secure Element ATECC608A, chiffre les secteurs à la volée en AES-256-GCM, puis
-relaie les opérations vers la seconde MCU (`bindkey-esp`, voir repo dédié) qui
-pilote le vrai média physique.
+`bindkey-tinyesp` is one of the two firmwares that make up the transparent
+encrypted USB proxy **BindKey**. This MCU is the one that talks directly to
+the host PC: it emulates a standard USB Mass Storage drive, intercepts every
+read / write, biometrically authenticates the user, derives the volume keys
+from an ATECC608A Secure Element, encrypts the sectors on the fly in
+AES-256-GCM, and then forwards the operations to the second MCU
+(`bindkey-esp`, see dedicated repo) that drives the real physical media.
 
-Le chiffrement est **transparent pour l'OS hôte** : aucun driver, aucune
-modification côté Windows/Linux/macOS/iOS/Android...
+Encryption is **transparent to the host OS**: no driver, no changes required
+on Windows/Linux/macOS/iOS/Android…
 
 ---
 
-## Place dans l'architecture BindKey
+## Place in the BindKey architecture
 
 ```
-        Client PC
-            │  USB (driver OS natif, classe MSC)
+        Host PC
+            │  USB (native OS driver, MSC class)
             ▼
   ┌─────────────────────────────┐
-  │   bindkey-tinyesp  (master) │   ← CE REPO
+  │   bindkey-tinyesp  (master) │   ← THIS REPO
   │   ESP32-S3 #1               │
-  │   • Émulation USB MSC       │
-  │   • Capteur empreinte       │
+  │   • USB MSC emulation       │
+  │   • Fingerprint sensor      │
   │   • ATECC608A (SE)          │
   │   • AES-256-GCM             │
-  │   • UART de contrôle        │
+  │   • UART control channel    │
   └─────────────┬───────────────┘
                 │  SPI3 inter-MCU (10–60 MHz)
                 ▼
@@ -75,52 +75,51 @@ modification côté Windows/Linux/macOS/iOS/Android...
   │   bindkey-esp  (slave)      │
   │   ESP32-S3 #2               │
   │   • SPI slave               │
-  │   • USB Host (vraie clé USB)│
+  │   • USB Host (real drive)   │
   └─────────────────────────────┘
 ```
 
 ---
 
-## Fonctionnalités
+## Features
 
-- Émulation **USB MSC Full Speed** via TinyUSB (VID `0x303A`, PID `0x4001`)
-- Authentification biométrique :
-  - **R503** (Grow, UART2, 57600 bps) — capteur actif par défaut
-  - **BM-Lite FPC** (SPI2) — alternative configurable via la constante `USE_R503`
-- Secure Element **ATECC608A** (I2C 100 kHz) :
-  - Signature ECDSA P-256 (slot 0)
-  - ECDH P-256 pour le partage de clés (slot 1)
-  - HMAC-SHA256 pour la dérivation des clés volume (slot 9)
-  - Slots 10–14 pour les clés partagées reçues d'autres BindKeys
-- Chiffrement disque **AES-256-GCM** (accélération hardware mbedTLS) :
-  - IV unique par `(LBA, counter)`, tag 16 octets stocké en MetaSector
-  - Layout 24 secteurs data + 1 meta par groupe
-- Lien **SPI3 master** vers le slave avec protocole maison à CRC32 et resync
-- Canal de contrôle **UART1** pour le logiciel desktop (commandes `ping`,
+- **USB MSC Full Speed** emulation via TinyUSB (VID `0x303A`, PID `0x4001`)
+- Biometric authentication:
+  - **R503** (Grow, UART2, 57600 bps) — sensor enabled by default
+  - **BM-Lite FPC** (SPI2) — alternative selectable via the `USE_R503` constant
+- **ATECC608A** Secure Element (I2C 100 kHz):
+  - ECDSA P-256 signature (slot 0)
+  - ECDH P-256 for key sharing (slot 1)
+  - HMAC-SHA256 for volume key derivation (slot 9)
+  - Slots 10–14 for shared keys received from other BindKeys
+- **AES-256-GCM** disk encryption (hardware-accelerated through mbedTLS):
+  - Unique IV per `(LBA, counter)`, 16-byte tag stored in MetaSector
+  - Layout: 24 data sectors + 1 meta sector per group
+- **SPI3 master** link to the slave with a custom CRC32-protected protocol and resync logic
+- **UART1** control channel for the desktop software (commands `ping`,
   `uid`, `enroll`, `challenge=`, `create_volume`, `share`, `recv_share`)
-- Table des volumes (BkTable) stockée au LBA 0 du média physique, supportant
-  jusqu'à 6 volumes et 5 BindKeys partagées par volume
+- Volume table (BkTable) stored at LBA 0 of the physical media, supporting
+  up to 6 volumes and 5 shared BindKeys per volume
 
 ---
 
-## Matériel requis
+## Hardware required
 
-| Élément           | Référence                                                          |
-|-------------------|--------------------------------------------------------------------|
-| MCU               | ESP32-S3 (n'importe quelle dev-board, ex. ESP32-S3-DevKitC-1)      |
-| Capteur empreinte | Grow R503 (par défaut) ou Fingerprint Cards BM-Lite                |
-| Secure Element    | Microchip ATECC608A Trust & GO (I2C)                               |
-| Adaptateur USB    | port USB-OTG natif de l'ESP32-S3 (D+/D-)                           |
-| Lien inter-MCU    | 5 fils SPI3 + ligne READY vers la carte `bindkey-esp`              |
-| Programmateur     | USB-UART intégré à la dev-board, ou ESP-Prog, ou CP2102 sur le PCB |
+| Item              | Reference                                                       |
+|-------------------|-----------------------------------------------------------------|
+| MCU               | ESP32-S3 (any dev-board, e.g. ESP32-S3-DevKitC-1)               |
+| Fingerprint sensor| Grow R503 (default) or Fingerprint Cards BM-Lite                |
+| Secure Element    | Microchip ATECC608A Trust & GO (I2C)                            |
+| USB connector     | native ESP32-S3 USB-OTG port (D+/D-)                            |
+| Inter-MCU link    | 5 SPI3 wires + READY line to the `bindkey-esp` board            |
+| Programmer        | USB-UART built into the dev-board, or ESP-Prog, or CP2102 on PCB|
 
 ---
 
-## Prérequis logiciels
+## Software prerequisites
 
-Ce firmware utilise la toolchain **Rust pour Xtensa** maintenue par
-Espressif, distincte de la toolchain stable habituelle. Trois outils
-indispensables :
+This firmware uses the **Rust for Xtensa** toolchain maintained by Espressif,
+distinct from the regular stable toolchain. Three essential tools:
 
 ### 1. Rust + `rustup`
 
@@ -128,43 +127,43 @@ indispensables :
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 ```
 
-### 2. `espup` (installateur de la toolchain Xtensa)
+### 2. `espup` (Xtensa toolchain installer)
 
 ```bash
 cargo install espup --locked
 espup install
-. $HOME/export-esp.sh        # à sourcer dans chaque shell
+. $HOME/export-esp.sh        # to source in every shell
 ```
 
-`espup install` installe automatiquement le compilateur `rustc` patché pour
-Xtensa, GCC pour Xtensa, LLVM, et configure les variables d'environnement
-ESP-IDF nécessaires à `esp-idf-sys`.
+`espup install` automatically installs the patched `rustc` compiler for
+Xtensa, GCC for Xtensa, LLVM, and configures the ESP-IDF environment
+variables required by `esp-idf-sys`.
 
-### 3. Outils de flash et de scaffolding
+### 3. Flash and scaffolding tools
 
 ```bash
-cargo install ldproxy           # linker proxy utilisé par esp-idf-sys
-cargo install espflash --locked # flash + monitor série
-cargo install cargo-generate    # pour créer de nouveaux projets ESP-IDF
+cargo install ldproxy           # linker proxy used by esp-idf-sys
+cargo install espflash --locked # flash + serial monitor
+cargo install cargo-generate    # to create new ESP-IDF projects
 ```
 
-### 4. (Optionnel) Création d'un projet ESP-IDF + Rust « from scratch »
+### 4. (Optional) Bootstrapping a new ESP-IDF + Rust project from scratch
 
-Si vous voulez régénérer un squelette équivalent à ce repo :
+If you want to regenerate a skeleton equivalent to this repo:
 
 ```bash
 cargo generate esp-rs/esp-idf-template cargo
 ```
 
-Réponses à donner au template :
-- **MCU** : `esp32s3`
-- **ESP-IDF version** : `v5.3.3` (cf. `.cargo/config.toml` de ce repo)
-- **STD support** : `true` (utilisé ici)
+Answers to give to the template:
+- **MCU**: `esp32s3`
+- **ESP-IDF version**: `v5.3.3` (see `.cargo/config.toml` in this repo)
+- **STD support**: `true` (used here)
 
-Le template produit la structure `Cargo.toml` + `.cargo/config.toml` +
-`sdkconfig.defaults` + `rust-toolchain.toml` que tu retrouves dans ce repo.
+The template produces the `Cargo.toml` + `.cargo/config.toml` +
+`sdkconfig.defaults` + `rust-toolchain.toml` layout that you find in this repo.
 
-### Dépendances système (Linux/macOS)
+### System dependencies (Linux/macOS)
 
 ```bash
 # Debian/Ubuntu
@@ -175,56 +174,56 @@ sudo apt install -y git wget flex bison gperf python3 python3-pip python3-venv \
 
 ---
 
-## Versions verrouillées (extrait `Cargo.toml`)
+## Pinned versions (extract from `Cargo.toml`)
 
-| Élément          | Version                                         |
+| Item             | Version                                         |
 |------------------|-------------------------------------------------|
-| Edition Rust     | 2021                                            |
+| Rust edition     | 2021                                            |
 | `rust-version`   | ≥ 1.77                                          |
-| Toolchain Rust   | `channel = "esp"` (cf. `rust-toolchain.toml`)   |
+| Rust toolchain   | `channel = "esp"` (see `rust-toolchain.toml`)   |
 | Target           | `xtensa-esp32s3-espidf`                         |
 | ESP-IDF          | `v5.3.3`                                        |
 | `esp-idf-svc`    | `0.51`                                          |
 | `esp-idf-sys`    | `0.36` (feature `native`)                       |
 | `embuild`        | `0.33`                                          |
-| TinyUSB          | `espressif/tinyusb 0.17.0~2` (composant managé) |
+| TinyUSB          | `espressif/tinyusb 0.17.0~2` (managed component)|
 
 ---
 
 ## Build, flash, monitor
 
 ```bash
-# Cloner le repo
+# Clone the repo
 git clone https://github.com/bindkey-project/bindkey-tinyesp.git
 cd bindkey-tinyesp
 
-# S'assurer que la toolchain ESP est active
+# Make sure the ESP toolchain is active
 . $HOME/export-esp.sh
 
-# Build debug
+# Debug build
 cargo build
 
-# Build release (recommandé pour la perf SPI / USB)
+# Release build (recommended for SPI / USB performance)
 cargo build --release
 
-# Build + flash + monitor série (commande principale)
+# Build + flash + serial monitor (main command)
 cargo run
-# équivalent à : cargo build && espflash flash --monitor target/...
+# equivalent to: cargo build && espflash flash --monitor target/...
 
 # Lint
 cargo clippy -- -D warnings
 ```
 
-> ⚠️ Toujours utiliser `cargo build` / `cargo run`. **Ne jamais** invoquer
-> `idf.py build` directement — `esp-idf-sys` orchestre déjà tout l'appel
-> ESP-IDF nécessaire. `idf.py menuconfig` reste utilisable uniquement pour
-> éditer interactivement `sdkconfig.defaults`.
+> ⚠️ Always use `cargo build` / `cargo run`. **Never** invoke `idf.py build`
+> directly — `esp-idf-sys` already orchestrates the full ESP-IDF call.
+> `idf.py menuconfig` is still useful, but only to interactively edit
+> `sdkconfig.defaults`.
 
 ---
 
-## Configuration `sdkconfig.defaults`
+## `sdkconfig.defaults` configuration
 
-Les éléments les plus structurants :
+The most structural entries:
 
 ```ini
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=16384
@@ -235,7 +234,7 @@ CONFIG_TINYUSB_MSC_ENABLED=y
 CONFIG_TINYUSB_TASK_STACK_SIZE=24576
 CONFIG_TINYUSB_MSC_BUFSIZE=8192
 
-# ATECC608A via cryptoauthlib (driver I2C legacy pour ESP-IDF ≥ 5.2)
+# ATECC608A via cryptoauthlib (legacy I2C driver for ESP-IDF ≥ 5.2)
 CONFIG_ATCA_I2C_USE_LEGACY_DRIVER=y
 CONFIG_ATECC608A_TCUSTOM=y
 CONFIG_ATCA_I2C_SDA_PIN=4
@@ -246,69 +245,69 @@ CONFIG_ATCA_I2C_BAUD_RATE=100000
 
 ---
 
-## Structure du code
+## Source tree
 
 ```
 src/
-├── main.rs                  ← boot, séquence d'init
+├── main.rs                  ← boot, init sequence
 ├── crypto/                  ← AES-256-GCM, ATECC608, BkTable, MetaSector
 │   ├── mod.rs
-│   ├── aes.rs               ← wrapper AES-256-GCM (esp_aes_gcm_*)
+│   ├── aes.rs               ← AES-256-GCM wrapper (esp_aes_gcm_*)
 │   ├── secure_element.rs    ← AteccSession, derive_volume_key_hmac, ECDH wrap/unwrap
 │   ├── disk_crypto.rs       ← encrypt_sector / decrypt_sector, make_iv / make_aad
 │   ├── disk_layout.rs       ← G=24, GROUP_PHYS=25, map_lba()
 │   ├── disk_meta.rs         ← MetaSector, MetaEntry (counter + tag), magic "BKMD"
-│   ├── encrypted_disk.rs    ← EncryptedDisk, read10/write10, cache meta, GLOBAL_DISK
+│   ├── encrypted_disk.rs    ← EncryptedDisk, read10/write10, meta cache, GLOBAL_DISK
 │   ├── volume_table.rs      ← BkTable (LBA 0), VolumeEntry, SharedAccess, dirty flag
-│   └── esp-cryptoauthlib/   ← composant C ATECC608 (FFI bindgen)
-├── fingerprint/             ← drivers capteur empreinte
+│   └── esp-cryptoauthlib/   ← C component for ATECC608 (FFI via bindgen)
+├── fingerprint/             ← fingerprint sensor drivers
 │   ├── mod.rs
-│   ├── fingerprint.rs       ← BM-Lite (SPI2) — bindings bmlite
-│   ├── fingerprint_r503.rs  ← R503 (UART2) — protocole packet maison
-│   └── BMLite/              ← composant C BM-Lite (FFI bindgen)
-├── spi_link/                ← protocole SPI3 master vers slave
+│   ├── fingerprint.rs       ← BM-Lite (SPI2) — bmlite bindings
+│   ├── fingerprint_r503.rs  ← R503 (UART2) — custom packet protocol
+│   └── BMLite/              ← C component for BM-Lite (FFI via bindgen)
+├── spi_link/                ← master-side SPI3 protocol
 │   ├── mod.rs
 │   ├── pins.rs              ← MOSI=13 MISO=12 SCLK=11 CS=10 READY=9
-│   ├── protocol.rs          ← header 16B, Cmd enum, MAX_PAYLOAD=8192, CRC32, magic "BK"
+│   ├── protocol.rs          ← 16B header, Cmd enum, MAX_PAYLOAD=8192, CRC32, magic "BK"
 │   ├── spi_master.rs        ← SpiMaster, DmaBuf, spi_xfer, wait_ready, resync
-│   └── api_spi.rs           ← API publique read/write/flush/get_status/get_capacity + stats
+│   └── api_spi.rs           ← public API read/write/flush/get_status/get_capacity + stats
 ├── usb_emulation/           ← TinyUSB MSC device
 │   ├── mod.rs
-│   ├── fake_usb.rs          ← callbacks SCSI / MSC (#[no_mangle]), init_fake_usb_msc
-│   └── esp-usb/             ← composant C esp_tinyusb (FFI bindgen)
-├── software_link/           ← UART de contrôle (UART1, 115200 bps)
+│   ├── fake_usb.rs          ← SCSI / MSC callbacks (#[no_mangle]), init_fake_usb_msc
+│   └── esp-usb/             ← C component for esp_tinyusb (FFI via bindgen)
+├── software_link/           ← UART control channel (UART1, 115200 bps)
 │   ├── mod.rs
 │   ├── task.rs              ← uart_task (FreeRTOS core 1, prio 10, stack 32KB)
-│   └── test_com.rs          ← parser ping/uid/enroll/challenge/share/recv_share
-└── led/                     ← indicateur d'état (GPIO 8)
+│   └── test_com.rs          ← parser for ping/uid/enroll/challenge/share/recv_share
+└── led/                     ← status indicator (GPIO 8)
     ├── mod.rs
-    └── led.rs               ← LedGuard (RAII : LED ON au new, OFF au drop)
+    └── led.rs               ← LedGuard (RAII: LED ON at new, OFF at drop)
 ```
 
 ---
 
-## Repo lié
+## Related repo
 
-[`bindkey-esp`](https://github.com/bindkey-project/bindkey-esp) — firmware de la seconde MCU, SPI slave +
-USB Host. Toute modification du protocole SPI (header, taille de payload,
-séquence du handshake READY, CRC32) **doit être coordonnée** entre les deux
-repos.
+[`bindkey-esp`](https://github.com/bindkey-project/bindkey-esp) — firmware for
+the second MCU, SPI slave + USB Host. Any change to the SPI protocol (header,
+payload size, READY handshake sequence, CRC32) **must be coordinated** between
+the two repos.
 
 ---
 
-## Profils de build
+## Build profiles
 
 ```toml
 [profile.release]
-opt-level = "s"   # optimisé taille (binaire à flasher en prod)
+opt-level = "s"   # size-optimized (production binary to flash)
 
 [profile.dev]
-opt-level = "z"   # taille max
-debug = true      # symboles présents, binaire compact
+opt-level = "z"   # max size optimization
+debug = true      # debug symbols included, binary stays compact
 ```
 
 ---
 
-## Licence et auteurs
+## License and authors
 
-Projet académique BindKey — INIZIATO William, LOPEZ Pierre-Louis, MATTEI Jean-Baptiste, ZAIETER Jassime, ADDOUH Marwa
+BindKey academic project — INIZIATO William, LOPEZ Pierre-Louis, MATTEI Jean-Baptiste, ZAIETER Jassime, ADDOUH Marwa
