@@ -190,12 +190,44 @@ sudo apt install -y git wget flex bison gperf python3 python3-pip python3-venv \
 
 ---
 
+## External C components (manual step — required to build)
+
+Two C components consumed through FFI are **not pulled in by a plain
+`git clone`** and must be added by hand before the firmware can build:
+
+| Path                          | Component        | Upstream source                                  |
+|-------------------------------|------------------|--------------------------------------------------|
+| `src/crypto/esp-cryptoauthlib`| ATECC608A driver | https://github.com/espressif/esp-cryptoauthlib   |
+| `src/usb_emulation/esp-usb`   | `esp_tinyusb`    | https://github.com/espressif/esp-usb             |
+
+They are recorded as git submodule *gitlinks* but the repo ships **no
+`.gitmodules`**, so `git clone` (and `git submodule update`) leaves both
+directories **empty**. This is expected.
+
+> ⚠️ A fresh clone — and therefore the GitHub Actions CI — **will fail** at the
+> `esp-idf-sys` build script (the C bindings can't find their sources). This is
+> normal: populate the two folders above first, then the build succeeds.
+
+To add them, clone the upstream components into the exact paths above, e.g.:
+
+```bash
+git clone https://github.com/espressif/esp-cryptoauthlib.git src/crypto/esp-cryptoauthlib
+git clone https://github.com/espressif/esp-usb.git            src/usb_emulation/esp-usb
+```
+
+> ℹ️ The **BM-Lite** component (`src/fingerprint/BMLite/`) **is** committed in
+> this repo and needs no manual step.
+
+---
+
 ## Build, flash, monitor
 
 ```bash
 # Clone the repo
 git clone https://github.com/bindkey-project/bindkey-tinyesp.git
 cd bindkey-tinyesp
+
+# Add the external C components first (see section above) — otherwise the build fails
 
 # Make sure the ESP toolchain is active
 . $HOME/export-esp.sh
