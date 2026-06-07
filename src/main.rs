@@ -23,24 +23,25 @@ use crate::crypto::encrypted_disk::{EncryptedDisk, set_global_disk};
 use crate::software_link::*;
 use crate::led::*;
 
-// ======================================================================
 // Fingerprint sensor selection flag
-// 0 = BM-Lite (FPC, SPI2) // attention si on remet le bmlite à changer spi3 -> spi2!
+// 0 = BM-Lite (FPC, SPI2) — careful: if BM-Lite is re-enabled, change SPI3 -> SPI2!
 // 1 = R503 (Grow, UART2)
-// ======================================================================
 const USE_R503: u8 = 1;
 
+// boot sequence: fingerprint gate → SPI → BK Table → Secure Element → EncryptedDisk → TinyUSB → UART task
 fn main() {
-    // Obligatoire pour esp-idf-sys
+    // required for esp-idf-sys
     link_patches();
 
-    // Logs ESP
+    // ESP logging
     EspLogger::initialize_default();
 
+    // LED initialization
     let _led = LedGuard::new();
     
     log::info!("Fingerprint authentication required...");
 
+    // fingerprint sensor boot authentication
     if USE_R503 == 1 {
         // ---------- R503 path ----------
         use crate::fingerprint::fingerprint_r503 as r503;
@@ -51,7 +52,7 @@ fn main() {
                 return;
             }
         }
-        // Skip auth if no template enrolled (enroll via UART "enroll" command first)
+        // skip auth if no template enrolled (enroll via UART "enroll" command first)
         match r503::is_user_enrolled() {
             Ok(true) => {
                 match r503::test_fingerprint_once() {
@@ -64,7 +65,7 @@ fn main() {
             }
             Ok(false) => {
                 log::warn!("R503: no template enrolled, skipping auth (use 'enroll' command)");
-                // No auth needed — green = unlocked
+                // no auth needed — green = unlocked
                 let _ = r503::led_on(r503::LedColor::Green);
             }
             Err(e) => {
@@ -81,7 +82,7 @@ fn main() {
                 return;
             }
         }
-        // Skip auth if no template enrolled
+        // skip auth if no template enrolled
         match fingerprint::is_user_enrolled() {
             Ok(true) => {
                 match test_fingerprint_once(){
@@ -103,7 +104,7 @@ fn main() {
     }
     
     
-
+    // initializing SPI BUS 
     log::info!("Starting fake USB MSC + SPI...");
 
     let mut spi = match SpiMaster::new() {
@@ -127,13 +128,11 @@ fn main() {
         );
         return;
     }
-
+    
+    // enables SPI Bus to be used anywhere 
     set_global_spi(&mut spi);
 
-    // Check media presence avant de tenter quoi que ce soit qui dépend du média.
-    // Si pas de clé USB branchée côté slave, skip le BkTable read et le warm-up :
-    // ils tomberaient sur du junk (le slave répond avec du bruit quand il n'a pas
-    // de disque) → CRC fail / timeouts inutiles.
+    // checks the media presence, if there is no hard drive, skip the warmup + the reading of the BkTable
     let mut media_ready = false;
     for attempt in 0..5u32 {
         match spi.get_status() {
@@ -154,7 +153,7 @@ fn main() {
     }
 
     let bk_table = if media_ready {
-        // Retry : le slave SPI peut prendre quelques secondes à démarrer après le boot
+        // retry: the SPI slave can take several seconds to restart
         let mut table = BkTable::new();
         for attempt in 0..5u32 {
             match read_bk_table_from_storage(&mut spi) {
@@ -177,12 +176,11 @@ fn main() {
         BkTable::new()
     };
 
+    // marking the fact that the BK Table was loaded late
     mark_bk_table_late_load_done();
 
-    // Warm-up SPI uniquement si on a un média : permet au slave de se synchroniser
-    // avant que TinyUSB ne démarre. Sinon le 1er capacity_cb appelé par l'OS pendant
-    // l'énumération SCSI peut tomber sur un SPI pas encore prêt → fallback 4096
-    // secteurs (2 MB) commit définitivement par l'OS.
+    // warmup in order to synchronize perfectly with the slave before starting TinyUSB
+    // fixing the issue when SCSI commands leads to an unready SPI.
     if media_ready {
         for i in 0..5u32 {
             match spi.get_capacity() {
@@ -198,19 +196,20 @@ fn main() {
         }
     }
 
+    // starting Secure Element initialization
     match AteccSession::new() {
         Ok(se) => {
             if let Err(err) = provision_config_zone(&se) {
                 log::error!("SE provision_config_zone failed rc={}", err);
                 return;
             }
-            /*// One-shot : lock data zone (débloque Sign, slots 10-14 restent inscriptibles via WriteConfig=Always)
-            // Idempotent : lock_data_zone() vérifie déjà si lockée
+            /* 
+            // old useful debug tests
             if let Err(rc) = se.lock_data_zone() {
                 log::error!("SE lock_data_zone failed rc={}", rc);
                 return;
             }*/
-            // Test : vérifie que slot 10 est toujours inscriptible après data lock (WriteConfig=Always)
+            // Test: checks slot 10 is still writable after data lock (WriteConfig=Always)
             /*let dummy = [0xABu8; 32];
             match se.write_data_slot(10, 0, &dummy) {
                 Ok(()) => log::info!("SE: slot 10 write OK — WriteConfig=Always confirmé"),
@@ -220,7 +219,8 @@ fn main() {
                 Ok(()) => log::info!("SE: slot 8 write OK — WriteConfig=Always confirmé"),
                 Err(rc) => log::error!("SE: slot 8 write FAILED rc={} — PROBLÈME WriteConfig", rc),
             }*/
-            // Lecture config zone pour vérifier SlotConfig[0/1], KeyConfig[0/1], ChipOptions
+
+            // reading config zone to confirm SlotConfig[0/1], KeyConfig[0/1], ChipOptions
             match se.read_config_zone() {
                 Ok(cfg) => {
                     log::info!("SE SlotConfig[0] (bytes 20-21) = {:02X?}", &cfg[20..22]);
@@ -229,7 +229,7 @@ fn main() {
                     log::info!("SE KeyConfig[1]  (bytes 98-99) = {:02X?}", &cfg[98..100]);
                     log::info!("SE ChipOptions  (bytes 90-91) = {:02X?}", &cfg[90..92]);
                     log::info!("SE ChipMode     (byte 19)     = {:02X?}", cfg[19]);
-                    // Détail ChipOptions (byte 90 low):
+                    // details ChipOptions (byte 90 low):
                     //   bit 0 = POST enable, bit 1 = IO Protection Key Enable
                     //   bit 2 = KDF AES Enable, bit 3 = ECDH Output Protection
                     let chipopts_lo = cfg[90];
@@ -239,7 +239,6 @@ fn main() {
                 }
                 Err(rc) => log::error!("SE read_config_zone failed rc={}", rc),
             }
-            // Diagnostique clé slot 0 : pubkey + force GenKey (Lockable=1) + test sign
             drop(se);
         }
         Err(err) => {
@@ -248,13 +247,13 @@ fn main() {
         }
     }
 
-    // === Pré-test ECDH round-trip (à retirer après validation) ===
-    // Wrap puis unwrap d'une clef AAA...A en utilisant la pubkey ECDH locale comme peer_pub.
-    // Si OK : atcab_ecdh + wrap_volume_key + unwrap_volume_key fonctionnent.
+    // testing new feature ECDH 
+    // wrap and unwrap of an AAA...A key with local ECDH pubkey ECDH as peer_pub
+    // if OK : atcab_ecdh + wrap_volume_key + unwrap_volume_key work
     match (|| -> Result<(), i32> {
         let se = AteccSession::new()?;
 
-        // Diagnostic : état de lock des deux zones
+        // verifying both zones states
         let (cfg_locked, data_locked) = se.lock_status()?;
         log::info!("ECDH test: lock_status cfg={} data={}", cfg_locked, data_locked);
 
@@ -281,15 +280,13 @@ fn main() {
         Err(rc) => log::error!("ECDH round-trip failed rc={}", rc),
     }
 
-    // Default key: identique sur toutes les BindKeys → la MBR/GPT et toute zone hors
-    // BkTable est lisible cross-device. Aucune protection cryptographique réelle ici
-    // (la BkTable au LBA 0 leake déjà la layout des volumes en clair). Les VRAIS volumes
-    // déclarés dans la BkTable utilisent leur propre clé via derive_volume_key_hmac (owner)
-    // ou via un slot ATECC (shared).
+    // default key: same on every BindKeys, the MBR or GPT table and every other zone (without BKTable)
+    // can be read cross-device. No cryptographic protection here
     const DEFAULT_VOLUME_KEY: [u8; 32] = *b"bindkey-default-key-shared!!!!v1";
     let vol_key = DEFAULT_VOLUME_KEY;
     log::info!("default vol_key[0..4] = {:02X?} (constant)", &vol_key[..4]);
 
+    // declaring the encryption disk and put it in the heap with Box
     let mut disk_box: Box<EncryptedDisk> = match EncryptedDisk::new(&vol_key){
         Ok(d) => Box::new(d),
         Err(err) => {
@@ -306,14 +303,16 @@ fn main() {
     set_global_disk(disk_ref);
     log::info!("EncryptedDisk initialized (heap)");
 
-    // BK Table en RAM globale (leak sur le heap — lifetime 'static)
+    // BKTable in RAM, leaked in the heap — lifetime 'static)
     let bk_table_ref: &'static mut BkTable = Box::leak(Box::new(bk_table));
     set_global_bk_table(bk_table_ref);
 
+    // reading all the existing volumes
     if let Err(e) = restore_volumes_from_bk_table(bk_table_ref, disk_ref){
         log::error!("BK Table volume restore failed: {}", e);
     }
 
+    // launching TinyUSB -> fake mass storage initialization
     unsafe{
         let err = init_fake_usb_msc();
         if err != ESP_OK {
@@ -326,6 +325,7 @@ fn main() {
         }
     }
 
+    // old useful tests
     /*match test_secure_element(){
         Ok(()) => log::info!("Secure Element ok"),
         Err(e) => log::error!("Secure Element failed : {}", e)
@@ -351,6 +351,7 @@ fn main() {
         Err(e) => log::info!("invalid : {}", e)
     }*/
 
+    // starting uart FreeRTOS task to start communication with BindKey software
     match start_uart_task(1){
         Ok(()) => log::info!("valid"),
         Err(e) => log::info!("invalid : {}", e)
@@ -358,7 +359,7 @@ fn main() {
 
     log::info!("Fake MSC ready. Plug USB to host.");
 
-    // Diagnostic: vérifier que le R503 répond toujours après toutes les inits
+    // testing if the R503 is alive after all initializations
     if USE_R503 == 1 {
         use crate::fingerprint::fingerprint_r503 as r503;
         match r503::handshake() {
@@ -367,23 +368,24 @@ fn main() {
         }
     }
 
-    // IMPORTANT: ne jamais sortir de main
+    // main loop
     loop {
         std::thread::sleep(std::time::Duration::from_secs(1));
     }
 }
 
+// old useful fingerprint test for debug
 pub fn test_fingerprint() -> Result<(), Box<dyn std::error::Error>> {
     fingerprint::init()?;
     fingerprint::wipe_templates()?;
     fingerprint::enroll_user()?;
 
-    // On exige 3 reconnaissances OK
+    // 3 finger recognitions
     for i in 1..=3 {
-        log::info!("🖐️ Test empreinte {i}/3 — pose ton doigt");
+        log::info!("Test empreinte {i}/3 — pose ton doigt");
 
         match fingerprint::check_once(25_000)? {
-            true => log::info!("✅ Doigt reconnu"),
+            true => log::info!("Doigt reconnu"),
             false => return Err("Doigt non reconnu".into()),
         }
     }

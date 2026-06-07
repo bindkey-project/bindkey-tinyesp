@@ -3,15 +3,18 @@ use esp_idf_sys::*;
 
 use crate::crypto::secure_element::{AteccSession, derive_volume_key_hmac};
 
+// initialization vector and GCM tag length
 pub const IV_LEN: usize = 12;
 pub const TAG_LEN: usize = 16;
 
+// new struct for handling AES GCM
 pub struct AesGcm{
     ctx: esp_gcm_context
 }
 
 impl AesGcm{
     pub fn new(key: &[u8]) -> Result<Self, i32>{
+        // determining which AES to use
         let keybits: u32 = match key.len(){
             16 => 128,
             24 => 192,
@@ -28,6 +31,7 @@ impl AesGcm{
 
             let cipher = mbedtls_cipher_id_t_MBEDTLS_CIPHER_ID_AES;
 
+            // associates GCM context with a key
             let rc = esp_aes_gcm_setkey(&mut s.ctx as *mut _, cipher, key.as_ptr(), keybits as c_uint);
             if rc != 0{
                 return Err(rc);
@@ -37,6 +41,7 @@ impl AesGcm{
         Ok(s)
     }
 
+    // encryption and tagging function plaintext -> ciphertext + tag
     pub fn encrypt_and_tag(&mut self, iv: &[u8; IV_LEN], aad: &[u8], plaintext: &[u8], ciphertext_out: &mut [u8], tag_out: &mut [u8; TAG_LEN]) -> Result<(), i32>{
         if ciphertext_out.len() != plaintext.len(){
             return Err(ESP_ERR_INVALID_SIZE);
@@ -55,6 +60,7 @@ impl AesGcm{
         Ok(())
     }
 
+    // decryption and verifying the tag, ciphertext + tag -> plaintext
     pub fn auth_decrypt(&mut self, iv: &[u8; IV_LEN], aad: &[u8], ciphertext: &[u8], tag: &[u8; TAG_LEN], plaintext_out: &mut [u8]) -> Result<(), i32>{
         if plaintext_out.len() != ciphertext.len(){
             return Err(ESP_ERR_INVALID_SIZE);
@@ -86,6 +92,7 @@ impl Drop for AesGcm{
     }
 }
 
+// old useful test
 pub fn test_aes_gcm() -> Result<(), i32>{
     log::info!("Testing AES-GCM...");
     //AES 256 32B key
@@ -137,6 +144,7 @@ pub fn test_aes_gcm() -> Result<(), i32>{
     Ok(())
 }
 
+// old useful test to linking between AES cipher and Secure Element
 pub fn test_aes_gcm_with_se(root_slot: u16) -> Result<(), i32>{
     log::info!("Testing AES-GCM with SE-derived key (slot {})...", root_slot);
     let se = AteccSession::new()?;

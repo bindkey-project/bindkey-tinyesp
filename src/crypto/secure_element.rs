@@ -3,38 +3,38 @@ use esp_idf_sys::*;
 
 use crate::crypto::aes::AesGcm;
 
-//error code CryptoAuthLib: 0 = ATCA_SUCCESS
+// error code CryptoAuthLib: 0 = ATCA_SUCCESS
 pub const ATCA_SUCCESS: i32 = 0;
 
-//zones/lock zones (CryptoAuthLib)
+// zones/lock zones (CryptoAuthLib)
 pub const ATCA_ZONE_CONFIG: u8 = 0x00;
 pub const ATCA_ZONE_DATA: u8   = 0x02;
 
-// SlotConfig (2 bytes par slot, little-endian)
-// Pour les slots "data", le low byte est:
+// SlotConfig (2 bytes per slot, little-endian)
+// For data slots, the low byte is: 
 //   [IsSecret(7)][EncryptRead(6)][LimitedUse(5)][NoMac(4)][ReadKey(3:0)]
-// Pour les slots ECC privés, le low byte change complètement:
+// For ECC private slots, the low byte changes:
 //   [IsSecret(7)][unused(6:4)][WriteEcdh(3)][Ecdh(2)][IntSign(1)][ExtSign(0)]
 // High byte : [WriteConfig(7:4)][WriteKey(3:0)]
-// WriteConfig : 0x0=Always (écrasable même après data lock), 0x2=Never (protégé après data lock)
-// 0x8F = slot ECC privé + autorise ExtSign/IntSign/ECDH/WriteEcdh.
-// 0x80 était invalide pour l'usage ECDSA: ExtSign=0 empêchait Sign.
+// WriteConfig : 0x0=Always (mutable after data lock), 0x2=Never (protected after data lock)
+// 0x8F = ECC private slot + allows ExtSign/IntSign/ECDH/WriteEcdh.
+// 0x80 was invalid for ECDSA: ExtSign=0 forbids Sign.
 const SC_ECC_PRIV: [u8; 2] = [0x83, 0x20];
 const SC_ECDH:     [u8; 2] = [0x8F, 0x20];
-const SC_CERT:     [u8; 2] = [0x00, 0x00]; // Public (cert lisible), WriteConfig=Always
+const SC_CERT:     [u8; 2] = [0x00, 0x00]; // Public (cert readable), WriteConfig=Always
 const SC_HMAC:     [u8; 2] = [0x80, 0x20]; // IsSecret, WriteConfig=Never
-const SC_AES_KEY:  [u8; 2] = [0x00, 0x00]; // Readable, WriteConfig=Always (révocable)
+const SC_AES_KEY:  [u8; 2] = [0x00, 0x00]; // Readable, WriteConfig=Always (mutable)
 const SC_DISABLED: [u8; 2] = [0x80, 0x20]; // IsSecret, WriteConfig=Never
 
-// KeyConfig (2 bytes par slot, little-endian)
+// KeyConfig (2 bytes per slot, little-endian)
 // Low byte  : [ReqAuth(7)][ReqRandom(6)][Lockable(5)][KeyType(4:2)][PubInfo(1)][Private(0)]
 // High byte : [X509id(7:5)][IntrusionDisable(4)][AuthKey(3:0)]
 // KeyType : 4=P256 ECC, 6=AES-128, 7=SHA/HMAC
 const KC_P256:     [u8; 2] = [0x33, 0x00]; // Private=1, PubInfo=1, KeyType=P256(4), Lockable=1
 const KC_AES:      [u8; 2] = [0x18, 0x00]; // KeyType=AES(6)
 const KC_HMAC:     [u8; 2] = [0x1C, 0x00]; // KeyType=SHA/HMAC(7)
-const KC_DATA:     [u8; 2] = [0x00, 0x00]; // Stockage pur (slot cert, pas une clef)
-const KC_DISABLED: [u8; 2] = [0x1C, 0x00]; // SHA/HMAC, non private, non lockable
+const KC_DATA:     [u8; 2] = [0x00, 0x00]; // Pure storage (slot cert, not a key)
+const KC_DISABLED: [u8; 2] = [0x1C, 0x00]; // SHA/HMAC, not private, not lockable
 
 //is_locked zones (CryptoAuthLib: 0=config, 1=data)
 pub const LOCK_ZONE_CONFIG: u8 = 0;
@@ -49,11 +49,11 @@ pub const SHA_MODE_TARGET_OUT_ONLY: u8  = 0xC0;
 
 #[repr(C)]
 pub struct ATCAIfaceCfg {
-    _private: [u8; 0] //opaque config no display to rust layout
+    _private: [u8; 0] // opaque config, layout not exposed to rust
 }
 
 extern "C" {
-    // Config "default" fournie côté C (esp-cryptoauthlib) et remplie via sdkconfig
+    // default config from esp-cryptoauthlib in C and written by sdk-config
     static cfg_ateccx08a_i2c_default: ATCAIfaceCfg;
 
     fn atcab_init(cfg: *const ATCAIfaceCfg) -> c_int;
@@ -84,6 +84,7 @@ extern "C" {
 pub struct AteccSession;
 
 impl AteccSession{
+    // opens an ATECC608 session over I2C
     pub fn new() -> Result<Self, i32>{
         unsafe{
             let rc = atcab_init(&cfg_ateccx08a_i2c_default as *const _);
@@ -94,6 +95,7 @@ impl AteccSession{
         Ok(Self)
     }
 
+    // reads the chip revision
     pub fn info(&self) -> Result<[u8; 4], i32>{
         let mut rev = [0u8; 4];
         unsafe{
@@ -105,6 +107,7 @@ impl AteccSession{
         Ok(rev)
     }
 
+    // reads the 9-byte serial number
     pub fn serial_number(&self) -> Result<[u8; ATCA_SERIAL_NUM_SIZE], i32>{
         let mut sn = [0u8; ATCA_SERIAL_NUM_SIZE];
         unsafe{
@@ -116,6 +119,7 @@ impl AteccSession{
         Ok(sn)
     }
 
+    // returns 32 random bytes from the chip RNG
     pub fn random32(&self) -> Result<[u8; 32], i32>{
         let mut r = [0u8; 32];
         unsafe{
@@ -127,6 +131,7 @@ impl AteccSession{
         Ok(r)
     }
 
+    // returns (config_locked, data_locked)
     pub fn lock_status(&self) -> Result<(bool, bool), i32>{
         unsafe{
             let mut cfg_locked = false;
@@ -143,6 +148,7 @@ impl AteccSession{
         }
     }
 
+    // generates an ECC P256 keypair in a slot, returns the public key
     pub fn gen_ecc_keypair(&self, slot: u16) -> Result<[u8; ATCA_PUBKEY_SIZE], i32>{
         let mut pk = [0u8; ATCA_PUBKEY_SIZE];
         unsafe{
@@ -154,6 +160,7 @@ impl AteccSession{
         Ok(pk)
     }
 
+    // reads the public key of an existing slot
     pub fn get_pubkey(&self, slot: u16) -> Result<[u8; ATCA_PUBKEY_SIZE], i32>{
         let mut pk = [0u8; ATCA_PUBKEY_SIZE];
         unsafe{
@@ -165,6 +172,7 @@ impl AteccSession{
         Ok(pk)
     }
 
+    // reads bytes from a data slot
     pub fn read_data_slot(&self, slot: u16, offset: usize, len: usize, out: &mut [u8]) -> Result<(), i32>{
         if out.len() < len{
             return Err(ESP_ERR_INVALID_SIZE);
@@ -178,6 +186,7 @@ impl AteccSession{
         }
     }
 
+    // writes bytes into a data slot
     pub fn write_data_slot(&self, slot: u16, offset: usize, data: &[u8]) -> Result<(), i32>{
         unsafe{
             let rc = atcab_write_bytes_zone(ATCA_ZONE_DATA, slot, offset, data.as_ptr(), data.len());
@@ -188,7 +197,7 @@ impl AteccSession{
         Ok(())
     }
 
-    //irreversible action
+    // locks the config zone (irreversible)
     pub fn lock_config_zone(&self) -> Result<(), i32>{
         let (cfg_locked, _) = self.lock_status()?;
         if cfg_locked{
@@ -206,6 +215,7 @@ impl AteccSession{
         Ok(())
     }
 
+    // locks the data zone (irreversible)
     pub fn lock_data_zone(&self) -> Result<(), i32>{
         let (_, data_locked) = self.lock_status()?;
         if data_locked{
@@ -223,6 +233,7 @@ impl AteccSession{
         Ok(())
     }
 
+    // ECDSA-signs a 32-byte message with a private slot
     pub fn sign(&self, priv_slot: u16, msg32: &[u8;32]) -> Result<[u8; ATCA_SIG_SIZE], i32>{
         let mut sig = [0u8; ATCA_SIG_SIZE];
         unsafe{
@@ -234,12 +245,12 @@ impl AteccSession{
         }   
     }
 
+    // ECDH(my_priv at slot, peer_pub) → 32-byte shared secret (PMS)
     pub fn ecdh(&self, slot: u16, peer_pub: &[u8; 64]) -> Result<[u8; 32], i32>{
         // Mode 0x0C = ECDH_MODE_COPY_OUTPUT_BUFFER
-        // Force la sortie du PMS dans le buffer de réponse, indépendamment de
-        // SlotConfig.WriteEcdh. Notre SC_ECDH = 0x8F a WriteEcdh=1 (mode "écrit
-        // dans le slot N+1") donc atcab_ecdh() (mode 0x00 = COMPATIBLE) tenterait
-        // d'écrire dans slot 2 (désactivé) → rejet du chip avec rc=-46.
+        // Forces the PMS output into the response buffer, regardless of SlotConfig.WriteEcdh.
+        // Our SC_ECDH = 0x8F has WriteEcdh=1 (mode "writes into slot N+1") so atcab_ecdh()
+        // (mode 0x00 = COMPATIBLE) would try to write into slot 2 (disabled) → chip rejects with rc=-46.
         const ECDH_MODE_COPY_OUTPUT_BUFFER: u8 = 0x0C;
         let mut pms = [0u8; 32];
         unsafe{
@@ -257,6 +268,7 @@ impl AteccSession{
         Ok(pms)
     }
 
+    // writes a random 32-byte root secret into a slot (dev provisioning, run once)
     pub fn provision_root_secret_dev(&self, slot: u16) -> Result<(), i32>{
         let secret = self.random32()?;
         self.write_data_slot(slot, 0, &secret)?;
@@ -264,20 +276,21 @@ impl AteccSession{
         Ok(())
     }
 
-    // TODO: ajouter read_aes_key(slot: u16) -> Result<[u8; 32], i32>
-    //   Lire en clair une clef AES partagée depuis les slots 10-14 (IsSecret=0, readable).
-    //   Utiliser atcab_read_bytes_zone(ATCA_ZONE_DATA, slot, 0, buf, 32).
-    //   Appelé au boot pour charger les clefs des volumes partagés reçus du serveur.
-    //   La clef doit être consommée immédiatement et non gardée dans un global.
+    // TODO: add read_aes_key(slot: u16) -> Result<[u8; 32], i32>
+    //   Read a shared AES key in clear from slots 10-14 (IsSecret=0, readable).
+    //   Use atcab_read_bytes_zone(ATCA_ZONE_DATA, slot, 0, buf, 32).
+    //   Called at boot to load the keys of the shared volumes received from the server.
+    //   The key must be consumed immediately and never kept in a global.
 
-    // TODO: ajouter la logique certificat (slot 8, atcacert)
-    //   - Binder atcacert_write_cert() et atcacert_read_cert() depuis cryptoauthlib
-    //   - Définir le template atcacert_def_t en flash (issuer=CA BindKey, subject=SN device)
-    //   - write_device_cert(sig_compressed: &[u8]) : écriture de la signature dans slot 8
-    //     après que le serveur CA a signé la pubkey slot 0 (flow provisioning UART)
-    //   - read_device_cert() -> DER : reconstruction du X.509 complet pour auth serveur
-    //   - X509id dans KC_DATA (slot 8) à mettre à jour pour matcher le template (0=désactivé pour l'instant)
+    // TODO: add the certificate logic (slot 8, atcacert)
+    //   - Bind atcacert_write_cert() and atcacert_read_cert() from cryptoauthlib
+    //   - Define the atcacert_def_t template in flash (issuer=CA BindKey, subject=device SN)
+    //   - write_device_cert(sig_compressed: &[u8]): write the signature into slot 8
+    //     after the CA server signed the slot 0 pubkey (UART provisioning flow)
+    //   - read_device_cert() -> DER: rebuild the full X.509 for server auth
+    //   - X509id in KC_DATA (slot 8) to update so it matches the template (0=disabled for now)
 
+    // reads the full 128-byte config zone
     pub fn read_config_zone(&self) -> Result<[u8; 128], i32> {
         let mut buf = [0u8; 128];
         unsafe {
@@ -289,6 +302,7 @@ impl AteccSession{
         Ok(buf)
     }
 
+    // computes HMAC-SHA256 over msg using the key in key_slot
     pub fn sha_hmac(&self, key_slot: u16, msg: &[u8]) -> Result<[u8; 32], i32>{
         let mut out = [0u8; 32];
         unsafe{
@@ -311,11 +325,13 @@ impl Drop for AteccSession{
 }
 
 
+// minimal SE check: open a session and read the revision
 pub fn atecc_smoke() -> Result<[u8; 4], i32>{
     let se = AteccSession::new()?;
     se.info()
 }
 
+// checks the ECC identity in a slot, provisioning it (GenKey) if missing
 pub fn test_ecc_identity(slot: u16) -> Result<(), i32>{
     let se = AteccSession::new()?;
 
@@ -343,6 +359,7 @@ pub fn test_ecc_identity(slot: u16) -> Result<(), i32>{
     Ok(())
 }
 
+// signs a fixed challenge to check the identity slot can sign
 pub fn test_identity_sign(slot: u16) -> Result<(), i32>{
     let se = AteccSession::new()?;
     let challenge = [0x42u8; 32];
@@ -352,6 +369,7 @@ pub fn test_identity_sign(slot: u16) -> Result<(), i32>{
 }
 
 
+// derives a reproducible 32-byte volume key: HMAC(root_slot, sn || volume_id || "bindkey")
 pub fn derive_volume_key_hmac(se: &AteccSession, root_slot: u16, volume_id: [u8; 16]) -> Result<[u8; 32], i32>{
     let sn = se.serial_number()?;
 
@@ -363,6 +381,7 @@ pub fn derive_volume_key_hmac(se: &AteccSession, root_slot: u16, volume_id: [u8;
     se.sha_hmac(root_slot, &msg)
 }
 
+// checks key derivation: stable for the same volume_id, different across volume_ids
 pub fn test_hmac_volume_derivation(root_slot: u16) -> Result<(), i32>{
     let se = AteccSession::new()?;
     let (_cfg_locked, data_locked) = se.lock_status()?;
@@ -388,6 +407,7 @@ pub fn test_hmac_volume_derivation(root_slot: u16) -> Result<(), i32>{
     Ok(())
 }
 
+// wraps a volume key for a peer: ECDH → KEK → AES-GCM, returns nonce(12)||ct(32)||tag(16)
 pub fn wrap_volume_key(se: &AteccSession, my_slot: u16, peer_pub: &[u8; 64], volume_key: &[u8; 32], aad: &[u8]) -> Result<[u8; 60], i32>{
     // ECDH(my_priv, peer_pub) => KEK 32 bytes
     let kek = se.ecdh(my_slot, peer_pub)?;
@@ -412,6 +432,7 @@ pub fn wrap_volume_key(se: &AteccSession, my_slot: u16, peer_pub: &[u8; 64], vol
     Ok(bundle)
 }
 
+// reverse of wrap_volume_key: ECDH → KEK → AES-GCM decrypt of the 60-byte bundle
 pub fn unwrap_volume_key(se: &AteccSession, my_slot: u16, peer_pub: &[u8; 64], bundle: &[u8; 60], aad: &[u8]) -> Result<[u8; 32], i32>{
     let kek = se.ecdh(my_slot, peer_pub)?;
 
@@ -428,17 +449,17 @@ pub fn unwrap_volume_key(se: &AteccSession, my_slot: u16, peer_pub: &[u8; 64], b
     Ok(volume_key)
 }
 
-/// Configure la config zone de l'ATECC608 et la verrouille.
-/// Idempotente : ne fait rien si la config zone est déjà lockée.
-///
-/// Layout des slots :
-///   0        : ECC P256 private key (identité device)
-///   1        : ECC P256 réservé
-///   2–7      : désactivés
-///   8        : device certificate compressé (416 bytes, public)
-///   9        : root HMAC secret (dérive les clefs volumes)
-///   10–14    : AES keys partage volumes (WriteConfig=Always → révocables)
-///   15       : désactivé
+// Configures the ATECC608 config zone and locks it.
+// Idempotent: does nothing if the config zone is already locked.
+//
+// Slot layout:
+//   0        : ECC P256 private key (device identity)
+//   1        : ECC P256 reserved
+//   2–7      : disabled
+//   8        : compressed device certificate (416 bytes, public)
+//   9        : root HMAC secret (derives the volume keys)
+//   10–14    : AES keys for volume sharing (WriteConfig=Always → revocable)
+//   15       : disabled
 pub fn provision_config_zone(se: &AteccSession) -> Result<(), i32> {
     let (cfg_locked, _) = se.lock_status()?;
     if cfg_locked {
@@ -446,50 +467,50 @@ pub fn provision_config_zone(se: &AteccSession) -> Result<(), i32> {
         return Ok(());
     }
 
-    // SlotConfig : bytes 20-51 de la config zone (2 bytes × 16 slots)
+    // SlotConfig: bytes 20-51 of the config zone (2 bytes × 16 slots)
     #[rustfmt::skip]
     let slot_configs: [u8; 32] = [
         SC_ECC_PRIV[0],  SC_ECC_PRIV[1],  // slot  0 : ECC P256 private key
         SC_ECDH[0],      SC_ECDH[1],      // slot  1 : ECDH P256
-        SC_DISABLED[0],  SC_DISABLED[1],  // slot  2 : désactivé
-        SC_DISABLED[0],  SC_DISABLED[1],  // slot  3 : désactivé
-        SC_DISABLED[0],  SC_DISABLED[1],  // slot  4 : désactivé
-        SC_DISABLED[0],  SC_DISABLED[1],  // slot  5 : désactivé
-        SC_DISABLED[0],  SC_DISABLED[1],  // slot  6 : désactivé
-        SC_DISABLED[0],  SC_DISABLED[1],  // slot  7 : désactivé
+        SC_DISABLED[0],  SC_DISABLED[1],  // slot  2 : disabled
+        SC_DISABLED[0],  SC_DISABLED[1],  // slot  3 : disabled
+        SC_DISABLED[0],  SC_DISABLED[1],  // slot  4 : disabled
+        SC_DISABLED[0],  SC_DISABLED[1],  // slot  5 : disabled
+        SC_DISABLED[0],  SC_DISABLED[1],  // slot  6 : disabled
+        SC_DISABLED[0],  SC_DISABLED[1],  // slot  7 : disabled
         SC_CERT[0],      SC_CERT[1],      // slot  8 : device certificate
         SC_HMAC[0],      SC_HMAC[1],      // slot  9 : HMAC root secret
-        SC_AES_KEY[0],   SC_AES_KEY[1],   // slot 10 : AES vol partagé
-        SC_AES_KEY[0],   SC_AES_KEY[1],   // slot 11 : AES vol partagé
-        SC_AES_KEY[0],   SC_AES_KEY[1],   // slot 12 : AES vol partagé
-        SC_AES_KEY[0],   SC_AES_KEY[1],   // slot 13 : AES vol partagé
-        SC_AES_KEY[0],   SC_AES_KEY[1],   // slot 14 : AES vol partagé
-        SC_DISABLED[0],  SC_DISABLED[1],  // slot 15 : désactivé
+        SC_AES_KEY[0],   SC_AES_KEY[1],   // slot 10 : shared AES vol
+        SC_AES_KEY[0],   SC_AES_KEY[1],   // slot 11 : shared AES vol
+        SC_AES_KEY[0],   SC_AES_KEY[1],   // slot 12 : shared AES vol
+        SC_AES_KEY[0],   SC_AES_KEY[1],   // slot 13 : shared AES vol
+        SC_AES_KEY[0],   SC_AES_KEY[1],   // slot 14 : shared AES vol
+        SC_DISABLED[0],  SC_DISABLED[1],  // slot 15 : disabled
     ];
 
-    // KeyConfig : bytes 96-127 de la config zone (2 bytes × 16 slots)
+    // KeyConfig: bytes 96-127 of the config zone (2 bytes × 16 slots)
     #[rustfmt::skip]
     let key_configs: [u8; 32] = [
         KC_P256[0],     KC_P256[1],     // slot  0 : P256 ECC
-        KC_P256[0],     KC_P256[1],     // slot  1 : P256 ECC réservé
-        KC_DISABLED[0], KC_DISABLED[1], // slot  2 : désactivé
-        KC_DISABLED[0], KC_DISABLED[1], // slot  3 : désactivé
-        KC_DISABLED[0], KC_DISABLED[1], // slot  4 : désactivé
-        KC_DISABLED[0], KC_DISABLED[1], // slot  5 : désactivé
-        KC_DISABLED[0], KC_DISABLED[1], // slot  6 : désactivé
-        KC_DISABLED[0], KC_DISABLED[1], // slot  7 : désactivé
-        KC_DATA[0],     KC_DATA[1],     // slot  8 : stockage cert
+        KC_P256[0],     KC_P256[1],     // slot  1 : P256 ECC reserved
+        KC_DISABLED[0], KC_DISABLED[1], // slot  2 : disabled
+        KC_DISABLED[0], KC_DISABLED[1], // slot  3 : disabled
+        KC_DISABLED[0], KC_DISABLED[1], // slot  4 : disabled
+        KC_DISABLED[0], KC_DISABLED[1], // slot  5 : disabled
+        KC_DISABLED[0], KC_DISABLED[1], // slot  6 : disabled
+        KC_DISABLED[0], KC_DISABLED[1], // slot  7 : disabled
+        KC_DATA[0],     KC_DATA[1],     // slot  8 : cert storage
         KC_HMAC[0],     KC_HMAC[1],     // slot  9 : HMAC root
         KC_AES[0],      KC_AES[1],      // slot 10 : AES key
         KC_AES[0],      KC_AES[1],      // slot 11 : AES key
         KC_AES[0],      KC_AES[1],      // slot 12 : AES key
         KC_AES[0],      KC_AES[1],      // slot 13 : AES key
         KC_AES[0],      KC_AES[1],      // slot 14 : AES key
-        KC_DISABLED[0], KC_DISABLED[1], // slot 15 : désactivé
+        KC_DISABLED[0], KC_DISABLED[1], // slot 15 : disabled
     ];
 
     unsafe {
-        // SlotConfig → bytes 20-51 de la config zone
+        // SlotConfig → bytes 20-51 of the config zone
         let rc = atcab_write_bytes_zone(
             ATCA_ZONE_CONFIG, 0, 20,
             slot_configs.as_ptr(), slot_configs.len(),
@@ -499,7 +520,7 @@ pub fn provision_config_zone(se: &AteccSession) -> Result<(), i32> {
             return Err(rc);
         }
 
-        // KeyConfig → bytes 96-127 de la config zone
+        // KeyConfig → bytes 96-127 of the config zone
         let rc = atcab_write_bytes_zone(
             ATCA_ZONE_CONFIG, 0, 96,
             key_configs.as_ptr(), key_configs.len(),
@@ -512,13 +533,13 @@ pub fn provision_config_zone(se: &AteccSession) -> Result<(), i32> {
 
     log::info!("SE: SlotConfig + KeyConfig written");
 
-    // Verrouillage config zone (irréversible — lock_config_zone() vérifie déjà l'état)
+    // Lock config zone (irreversible, lock_config_zone() already checks the state)
     se.lock_config_zone()?;
     log::info!("SE: config zone provisioned and locked");
 
-    // Génération de la paire ECC identité dans slot 0.
-    // get_pubkey() permet de détecter si une clef existe déjà (data zone non lockée).
-    // Si ça échoue on génère — sur un chip neuf c'est toujours le cas.
+    // Generate the ECC identity keypair in slot 0.
+    // get_pubkey() detects whether a key already exists (data zone not locked).
+    // If it fails we generate one, always the case on a fresh chip.
     match se.get_pubkey(0) {
         Ok(pk) => log::info!("SE: slot 0 ECC already present pubkey[0..4]={:02X?}", &pk[..4]),
         Err(_) => {
@@ -527,7 +548,7 @@ pub fn provision_config_zone(se: &AteccSession) -> Result<(), i32> {
         }
     }
 
-    // écriture de la clef pour ECDH
+    // generate the ECDH keypair (slot 1)
     match se.get_pubkey(1) {
         Ok(pk) => log::info!("SE: slot 1 ECC already present pubkey[0..4]={:02X?}", &pk[..4]),
         Err(_) => {
@@ -536,15 +557,15 @@ pub fn provision_config_zone(se: &AteccSession) -> Result<(), i32> {
         }
     }
 
-    // Écriture du root HMAC secret dans slot 9 (aléa via atcab_random).
-    // CRITIQUE : ce secret dérive TOUTES les clefs volumes via HMAC-SHA256.
-    // Il ne peut pas être lu (IsSecret=1) — il est irrécouvrable si perdu.
-    // On l'écrit une seule fois ici, protégé par le guard cfg_locked en tête de fonction.
+    // Write the root HMAC secret into slot 9 (random via atcab_random).
+    // CRITICAL: this secret derives ALL volume keys via HMAC-SHA256.
+    // It cannot be read (IsSecret=1), unrecoverable if lost.
+    // Written only once here, guarded by the cfg_locked check at the top of the function.
     se.provision_root_secret_dev(9)?;
     log::info!("SE: slot 9 root HMAC secret written");
 
-    // Lock data zone : nécessaire pour que Sign fonctionne sur ATECC608A.
-    // Slots 10-14 restent inscriptibles (WriteConfig=Always).
+    // Lock data zone: required for Sign to work on ATECC608A.
+    // Slots 10-14 stay writable (WriteConfig=Always).
     se.lock_data_zone()?;
     log::info!("SE: data zone locked");
 
@@ -552,6 +573,7 @@ pub fn provision_config_zone(se: &AteccSession) -> Result<(), i32> {
     Ok(())
 }
 
+// full SE self-test: revision, lock status, ECC identity, signature, HMAC derivation
 pub fn test_secure_element() -> Result<(), i32>{
     log::info!("Testing ATECC608...");
     match atecc_smoke() {

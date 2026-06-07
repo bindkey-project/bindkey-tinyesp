@@ -2,16 +2,19 @@ use core::{ptr, slice, sync::atomic::{AtomicU32, Ordering}};
 use esp_idf_sys::*;
 use super::pins::*;
 use super::protocol::{Cmd, Header, MAGIC, MAX_PAYLOAD, RESP_FLAG, VERSION, CRC_LEN, spi_crc32};
+// header length (16) and full frame length (header + payload + CRC)
 pub const HDR_LEN: usize = core::mem::size_of::<Header>();
 pub const FRAME_LEN: usize = HDR_LEN + MAX_PAYLOAD + CRC_LEN;
 
-extern "C" {                                                                                                                                                                                                                              
+extern "C" {
       fn ets_delay_us(us: u32);
 }
 
+// counter used to periodically yield while polling READY
 static IDLE_FEED_CTR: AtomicU32 = AtomicU32::new(0);
 const ENABLE_SPI_PROF_LOGS: bool = true;
 
+// rolling SPI profiling counters (req/wait/resp timing + throughput)
 #[derive(Default)]
 struct Perf{
     ops: u64,
@@ -23,12 +26,14 @@ struct Perf{
 }
 
 impl Perf{
+    // counts a transfer's bytes (SPI is full-duplex, so tx == rx)
     #[inline]
     fn add_xfer_bytes(&mut self, nbytes: usize){
         self.tx_bytes += nbytes as u64;
         self.rx_bytes += nbytes as u64;
     }
 
+    // logs averaged timing/throughput every 256 ops
     fn log_if_needed(&self){
         if !ENABLE_SPI_PROF_LOGS || self.ops == 0 || (self.ops % 256) != 0 {
             return;
@@ -50,12 +55,14 @@ impl Perf{
     }
 }
 
+// DMA-capable buffer allocated once in internal SRAM
 struct DmaBuf{
     ptr: *mut u8,
     len: usize,
 }
 
 impl DmaBuf{
+    // allocates a DMA-capable, 4-byte-aligned buffer in internal RAM
     fn alloc(len: usize) -> Result<Self, i32>{
         unsafe {
             let p = heap_caps_malloc(len,(MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL) as u32,) as *mut u8;
@@ -63,7 +70,7 @@ impl DmaBuf{
                 return Err(ESP_ERR_NO_MEM);
             }
 
-            //4-byte align min (DMA friendly)
+            // 4-byte align min (DMA friendly)
             if (p as usize) & 0x3 != 0{
                 heap_caps_free(p as *mut _);
                 return Err(ESP_ERR_INVALID_STATE);
@@ -96,12 +103,13 @@ impl Drop for DmaBuf{
     }
 }
 
+// SPI3 master to the slave ESP32-S3, with persistent DMA buffers and resync state
 pub struct SpiMaster{
     dev: spi_device_handle_t,
     seq: u16,
     needs_resync: bool,
 
-    //persistant buffers (DMA-capable) : nothing on the stack
+    // persistent buffers (DMA-capable): nothing on the stack
     tx: DmaBuf,
     rx: DmaBuf,
 
@@ -109,11 +117,12 @@ pub struct SpiMaster{
 }
 
 impl SpiMaster{
+    // allocates the DMA buffers (device not configured yet)
     pub fn new() -> Result<Self, i32>{
         Ok(Self{dev: ptr::null_mut(), seq: 1, needs_resync: false, tx: DmaBuf::alloc(FRAME_LEN)?, rx: DmaBuf::alloc(FRAME_LEN)?, perf: Perf::default()})
     }
 
-    //called once at boot
+    // configures the SPI bus + device (60 MHz, mode 0); called once at boot
     pub fn init(&mut self) -> Result<(), i32>{
         unsafe{
             // GPIO13 drive test — remove after diagnosis
@@ -141,19 +150,19 @@ impl SpiMaster{
             buscfg.data6_io_num = -1;
             buscfg.data7_io_num = -1;
 
-            //one DMA transaction => one frame_len of bytes
+            // one DMA transaction => one FRAME_LEN of bytes
             buscfg.max_transfer_sz = FRAME_LEN as i32;
 
             let dma: spi_dma_chan_t = spi_common_dma_t_SPI_DMA_CH_AUTO as spi_dma_chan_t;
 
-            // attention si on remet le bmlite à changer !
+            // careful: this shares SPI2 with the BM-Lite — revisit if it is re-enabled
             let err = spi_bus_initialize(spi_host_device_t_SPI2_HOST, &buscfg, dma);
             //log::info!("spi_bus_initialize ret={}", err);
             if err != ESP_OK{
                 return Err(err);
             }
 
-            //device cfg
+            // device cfg
             let mut devcfg: spi_device_interface_config_t = core::mem::zeroed();
             devcfg.clock_speed_hz = 60_000_000;
             devcfg.mode = 0;
@@ -171,16 +180,18 @@ impl SpiMaster{
         }
     }
 
+    // errors out if init() has not configured the device yet
     #[inline]
     fn ensure_ready(&self) -> Result<(), i32>{
         if self.dev.is_null(){
             Err(ESP_ERR_INVALID_STATE)
-        } 
+        }
         else{
             Ok(())
         }
     }
 
+    // returns the current seq and increments it (wrapping)
     #[inline]
     fn next_seq(&mut self) -> u16{
         let s = self.seq;
@@ -188,21 +199,25 @@ impl SpiMaster{
         s
     }
 
+    // mutable view of the TX DMA buffer
     #[inline]
     pub fn tx_buf_mut(&mut self) -> &mut [u8]{
         self.tx.as_mut()
     }
 
+    // read-only view of the RX DMA buffer
     #[inline]
     pub fn rx_buf(&self) -> &[u8]{
         self.rx.as_ref()
     }
 
+    // RX buffer slice past the header (the payload)
     #[inline]
     fn rx_payload(&self) -> &[u8]{
         &self.rx_buf()[HDR_LEN..]
     }
 
+    // runs one full-duplex DMA transfer of nbytes (tx → slave, rx ← slave)
     pub(crate) fn spi_xfer(&mut self, nbytes: usize) -> Result<(), i32>{
         self.ensure_ready()?;
 
@@ -227,6 +242,7 @@ impl SpiMaster{
         Ok(())
     }
 
+    // polls READY until HIGH (slave has the response), then waits 50us for slave DMA arming
     pub(crate) fn wait_ready(timeout_ms: u32) -> Result<(), i32>{
         let start = unsafe {esp_timer_get_time() as i64};
         let timeout_us = (timeout_ms as i64) * 1000;
@@ -256,6 +272,7 @@ impl SpiMaster{
         Ok(())
     }
 
+    // polls READY until LOW (slave has consumed/processed the data)
     pub(crate) fn wait_ready_low(timeout_ms: u32) -> Result<(), i32>{
         let start = unsafe{esp_timer_get_time() as i64};
         let timeout_us = (timeout_ms as i64) * 1000;
@@ -270,6 +287,7 @@ impl SpiMaster{
         Ok(())
     }
 
+    // checks a response header: magic/version, RESP_FLAG, matching seq and chunk_idx
     pub(crate) fn validate_resp(resp: &Header, seq: u16, chunk_idx: u16) -> Result<(), i32>{
         let resp_reserved = resp.reserved;
         let resp_seq = resp.seq;
@@ -295,15 +313,16 @@ impl SpiMaster{
         Ok(())
     }
 
+    // reads the response header from the RX buffer (unaligned)
     #[inline]
     pub fn read_resp_header(&self) -> Header{
         unsafe { ptr::read_unaligned(self.rx.ptr as *const Header) }
     }
 
-    /// Wait for the slave to be idle (READY LOW) before sending a new command.
-    /// After the slave finishes send_response (sets READY LOW), it needs a few
-    /// microseconds to loop back and call spi_slave_xfer. Without this wait,
-    /// the master can send a header before the slave's DMA is set up → lost data → desync.
+    // wait for the slave to be idle (READY LOW) before sending a new command.
+    // after the slave finishes send_response (sets READY LOW), it needs a few
+    // microseconds to loop back and call spi_slave_xfer. Without this wait,
+    // the master can send a header before the slave's DMA is set up → lost data → desync.
     #[inline]
     fn wait_slave_idle(&self) -> Result<(), i32>{
         // if READY is already low, slave is idle — just need DMA setup time
@@ -317,9 +336,9 @@ impl SpiMaster{
         Ok(())
     }
 
-    /// After an SPI error (timeout, invalid response), the slave may still be
-    /// processing the old command. Wait for it to finish, then drain any
-    /// pending response by doing a dummy transfer.
+    // after an SPI error (timeout, invalid response), the slave may still be
+    // processing the old command. Wait for it to finish, then drain any
+    // pending response by doing a dummy transfer.
     pub fn resync(&mut self){
         if !self.needs_resync{
             return;
@@ -346,12 +365,13 @@ impl SpiMaster{
         log::warn!("SPI resync: done");
     }
 
+    // command frame (GetStatus/GetCapacity/Flush): send header, wait READY, read response
     pub fn cmd_frame(&mut self, cmd: Cmd, chunk_idx: u16, arg0: u32, arg1: u32, ready_timeout_ms: u32, resp_payload_len: usize) -> Result<(Header, u16), i32>{
         self.resync();
         self.wait_slave_idle()?;
         let seq = self.next_seq();
 
-        //phase 1: REQ
+        // phase 1: REQ
         self.tx_buf_mut().fill(0);
 
         let mut req = Header::new(cmd, seq, arg0, arg1);
@@ -365,14 +385,14 @@ impl SpiMaster{
         self.spi_xfer(HDR_LEN)?;
         let t1 = unsafe { esp_timer_get_time() as i64 };
 
-        //wait READY
+        // wait READY
         if let Err(e) = Self::wait_ready(ready_timeout_ms){
             self.needs_resync = true;
             return Err(e);
         }
         let t2 = unsafe { esp_timer_get_time() as i64 };
 
-        //phase 2: RESP
+        // phase 2: RESP
 
         self.spi_xfer(HDR_LEN + resp_payload_len)?;
         let t3 = unsafe { esp_timer_get_time() as i64 };
@@ -392,6 +412,7 @@ impl SpiMaster{
         Ok((resp, seq))
     }
 
+    // write frame: header → READY → payload+CRC → READY low/high → read response
     pub fn write_frame(&mut self, chunk_idx: u16, lba_start: u32, nblocks_total: u32, payload: &[u8], ready_timeout_ms: u32) -> Result<(Header, u16), i32>{
         self.resync();
         self.wait_slave_idle()?;
@@ -454,6 +475,7 @@ impl SpiMaster{
         Ok((resp, seq))
     }
 
+    // read frame: header → READY → read header+payload+CRC, then verify the CRC32
     pub fn read_frame(&mut self, chunk_idx: u16, lba_start: u32, nblocks_total: u32, chunk_len: usize, ready_timeout_ms: u32) -> Result<(Header, u16), i32>{
         self.resync();
         self.wait_slave_idle()?;
@@ -520,7 +542,7 @@ impl SpiMaster{
         Ok((resp, seq))
     }
 
-    // Helpers utilisés par api_spi.rs
+    // helper used by api_spi.rs: the last received payload
     #[inline]
     pub fn last_rx_payload(&self) -> &[u8]{
         self.rx_payload()

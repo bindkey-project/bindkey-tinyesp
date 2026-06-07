@@ -4,7 +4,7 @@ use lazy_static::lazy_static;
 use std::sync::Mutex;
 
 use esp_idf_svc::sys::bmlite::{
-    // GPIO / SPI types et constantes
+    // GPIO / SPI types and constants
     gpio_num_t_GPIO_NUM_16,
     gpio_num_t_GPIO_NUM_17,
     gpio_num_t_GPIO_NUM_8,
@@ -16,21 +16,19 @@ use esp_idf_svc::sys::bmlite::{
     pin_config_t,
     spi_host_device_t_SPI2_HOST,
 
-    // Plateforme BM-Lite
+    // BM-Lite platform
     platform_deinit,
     platform_init,
 
-    // Résultats / status
+    // results / status
     fpc_bep_result_t_FPC_BEP_RESULT_OK,
 
-    // MTU fourni par ESP-IDF
+    // MTU provided by ESP-IDF
     MTU,
 };
 
-// ======================================================
-// 1) Structs BM-Lite corrigées (d'après hcp_tiny.h)
-// ======================================================
 
+// 1) BM-Lite structs (matching hcp_tiny.h)
 #[repr(C)]
 pub struct HCP_arg_t {
     pub size: u32,
@@ -50,9 +48,7 @@ pub struct HCP_comm_t {
     pub bep_result: i32,
 }
 
-// ======================================================
-// 2) console_initparams_t équivalent Rust
-// ======================================================
+// 2) Rust equivalent of console_initparams_t
 
 #[repr(C)]
 pub struct Params {
@@ -64,9 +60,7 @@ pub struct Params {
     pub pins: *mut pin_config_t,
 }
 
-// ======================================================
-// 3) Déclarations externes C (bmlite_if.h)
-// ======================================================
+// 3) C extern declarations (bmlite_if.h)
 
 extern "C" {
     pub fn bep_enroll_finger(chain: *mut HCP_comm_t) -> i32;
@@ -88,10 +82,10 @@ extern "C" {
     pub fn sensor_wait_finger_present(chain: *mut HCP_comm_t, timeout: u16) -> i32;
 }
 
-// ======================================================
-// 4) Contexte global du capteur
-// ======================================================
 
+// 4) Global sensor context
+
+// holds the allocated C structs and the active comm chain for the sensor
 struct SensorCtx {
     params: *mut Params,
     pins: *mut pin_config_t,
@@ -135,10 +129,10 @@ lazy_static! {
     static ref SENSOR_CTX: Mutex<SensorCtx> = Mutex::new(SensorCtx::new());
 }
 
-// ======================================================
-// 5) Helper pour erreurs
-// ======================================================
 
+// 5) Error helper
+
+// maps a BM-Lite result code to a Result, labelling the failing call
 fn check_bep(res: i32, what: &str) -> Result<()> {
     if res == fpc_bep_result_t_FPC_BEP_RESULT_OK {
         Ok(())
@@ -147,10 +141,10 @@ fn check_bep(res: i32, what: &str) -> Result<()> {
     }
 }
 
-// ======================================================
-// 6) Création des structs C (Params + HCP_comm + pin_config)
-// ======================================================
 
+// 6) Build the C structs (Params + HCP_comm + pin_config)
+
+// allocates the comm chain, pin config and params (leaked, kept alive in SENSOR_CTX)
 unsafe fn alloc_config() -> Result<(*mut Params, *mut pin_config_t, *mut HCP_comm_t)> {
     let pkt_buffer = Box::into_raw(Box::new([0u8; 1024 * 3])) as *mut u8;
     let txrx_buffer = Box::into_raw(Box::new([0u8; MTU as usize])) as *mut u8;
@@ -180,7 +174,7 @@ unsafe fn alloc_config() -> Result<(*mut Params, *mut pin_config_t, *mut HCP_com
     let params = Box::into_raw(Box::new(Params {
         iface: interface_t_SPI_INTERFACE,
         port: ptr::null_mut(),
-        baudrate: 1_000_000, // plus stable pour test
+        baudrate: 1_000_000, // more stable for testing
         timeout: 3000,
         hcp_comm: chain,
         pins,
@@ -189,10 +183,10 @@ unsafe fn alloc_config() -> Result<(*mut Params, *mut pin_config_t, *mut HCP_com
     Ok((params, pins, chain))
 }
 
-// ======================================================
-// 7) API Publique
-// ======================================================
 
+// 7) Public API
+
+// initializes the BM-Lite platform (idempotent) and stores the context
 pub fn init() -> Result<()> {
     let mut ctx = SENSOR_CTX.lock().unwrap();
 
@@ -216,7 +210,7 @@ pub fn init() -> Result<()> {
         log::info!("write ptr = {:?}", (*chain).write);
         log::info!("read ptr  = {:?}", (*chain).read);
 
-        log::info!("Calibration du capteur...");
+        log::info!("Calibrating sensor...");
     //unsafe { check_bep(bep_sensor_calibrate(ctx.chain), "bep_sensor_calibrate")?; }
     }
 
@@ -224,6 +218,7 @@ pub fn init() -> Result<()> {
     Ok(())
 }
 
+// true if at least one template is stored on the sensor
 pub fn is_user_enrolled() -> Result<bool> {
     let ctx = SENSOR_CTX.lock().unwrap();
     if !ctx.is_set() {
@@ -234,6 +229,7 @@ pub fn is_user_enrolled() -> Result<bool> {
     Ok(count > 0)
 }
 
+// removes all enrolled templates from the sensor
 pub fn wipe_templates() -> Result<()> {
     let ctx = SENSOR_CTX.lock().unwrap();
     if !ctx.is_set() {
@@ -242,9 +238,10 @@ pub fn wipe_templates() -> Result<()> {
     unsafe { check_bep(bep_template_remove_all(ctx.chain), "bep_template_remove_all")?; }
     Ok(())
 }
-//il faudra changer ça de place
+// TODO: move this import to the top of the file
 use std::{thread, time::Duration};
 
+// enrolls a finger and saves it as template id 1
 pub fn enroll_user() -> Result<()> {
     let ctx = SENSOR_CTX.lock().unwrap();
     if !ctx.is_set() {
@@ -253,21 +250,21 @@ pub fn enroll_user() -> Result<()> {
 
     log::info!("Enrôlement : pose ton doigt...");
 
-    // 1) Enrôlement
+    // 1) enroll
     unsafe {
         check_bep(
             bep_enroll_finger(ctx.chain),
             "bep_enroll_finger",
         )?;
 
-        // 2) Sauvegarde du template
+        // 2) save the template
         check_bep(
             bep_template_save(ctx.chain, 1),
             "bep_template_save",
         )?;
     }
 
-    // 3) Vérification que le template est bien stocké
+    // 3) verify the template was actually stored
     let mut count: u16 = 0;
     unsafe {
         check_bep(
@@ -277,8 +274,7 @@ pub fn enroll_user() -> Result<()> {
     }
     log::info!("Templates après save: {}", count);
 
-    // 4) TRÈS IMPORTANT :
-    // attendre que le doigt soit retiré avant toute identification
+    // 4) IMPORTANT: wait for the finger to be lifted before any identification
     log::info!("Enrôlement terminé. Lève ton doigt...");
     unsafe {
         check_bep(
@@ -287,19 +283,20 @@ pub fn enroll_user() -> Result<()> {
         )?;
     }
 
-    // 5) Petite pause pour laisser le module se stabiliser
+    // 5) short pause to let the module settle
     thread::sleep(Duration::from_millis(150));
 
     Ok(())
 }
 
+// waits for a finger, identifies it once, returns whether it matched a template
 pub fn check_once(timeout_ms: u32) -> Result<bool> {
     let ctx = SENSOR_CTX.lock().unwrap();
     if !ctx.is_set() {
         return Err(anyhow!("BM-Lite not initialized"));
     }
 
-    // 1) Attendre que le doigt soit posé
+    // 1) wait for the finger to be placed
     let t: u16 = timeout_ms.min(65_535) as u16;
     unsafe {
         check_bep(
@@ -308,7 +305,7 @@ pub fn check_once(timeout_ms: u32) -> Result<bool> {
         )?;
     }
 
-    // 2) Identifier
+    // 2) identify
     let mut tid: u16 = 0;
     let mut matched = false;
     unsafe {
@@ -318,7 +315,7 @@ pub fn check_once(timeout_ms: u32) -> Result<bool> {
         )?;
     }
 
-    // 3) Attendre que le doigt soit retiré 
+    // 3) wait for the finger to be lifted
     unsafe {
         let _ = sensor_wait_finger_not_present(ctx.chain, 5000);
     }
@@ -330,8 +327,9 @@ pub fn check_once(timeout_ms: u32) -> Result<bool> {
     Ok(matched)
 }
 
+// requires 3 successful identifications in a row
 pub fn test_fingerprint() -> Result<(), Box<dyn std::error::Error>> {
-    // On exige 3 reconnaissances OK
+    // require 3 OK identifications
     for i in 1..=3 {
         log::info!("🖐️ Test empreinte {i}/3 — pose ton doigt");
 
@@ -345,6 +343,7 @@ pub fn test_fingerprint() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+// full flow: init, (re)enroll, then require a 3/3 identification
 pub fn fingerprint_validation() -> Result<(), Box<dyn std::error::Error>>{
     init()?;
     wipe_templates()?;
@@ -367,14 +366,15 @@ pub fn fingerprint_validation() -> Result<(), Box<dyn std::error::Error>>{
     Ok(())
 }
 
+// single identification used as the boot auth gate
 pub fn test_fingerprint_once() -> Result<(), Box<dyn std::error::Error>> {
 
     log::info!("Test empreinte - pose ton doigt");
 
     let matched = wait_and_identify_sliced(
-        25_000, // temps max pour poser le doigt
-        200,    // slice attente doigt (200-500ms conseillé)
-        10_000, // temps pour l'identification (scan)
+        25_000, // max time to place the finger
+        200,    // finger-wait slice (200-500ms recommended)
+        10_000, // time allowed for identification (scan)
     )?;
 
     if matched {
@@ -387,6 +387,7 @@ pub fn test_fingerprint_once() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+// waits for a finger in short slices (WDT-friendly) then identifies it
 pub fn wait_and_identify_sliced(
     wait_total_ms: u32,
     wait_slice_ms: u16,
@@ -400,23 +401,23 @@ pub fn wait_and_identify_sliced(
     let start_us = unsafe { esp_idf_sys::esp_timer_get_time() } as i64;
     let total_timeout_us = (wait_total_ms as i64) * 1000;
 
-    // --- Phase A: attendre doigt en tranches courtes ---
+    // --- Phase A: wait for the finger in short slices ---
     loop {
         let now_us = unsafe { esp_idf_sys::esp_timer_get_time() } as i64;
         if now_us - start_us >= total_timeout_us {
-            return Ok(false); // pas de doigt dans le temps imparti
+            return Ok(false); // no finger within the allotted time
         }
 
         let rc = unsafe { sensor_wait_finger_present(ctx.chain, wait_slice_ms) };
         if rc == 0 {
-            break; // doigt détecté
+            break; // finger detected
         }
 
-        // laisse respirer (anti-WDT)
+        // let the system breathe (anti-WDT)
         unsafe { esp_idf_sys::vTaskDelay(1) };
     }
 
-    // --- Phase B: identify (laisser le temps de scanner) ---
+    // --- Phase B: identify (give it time to scan) ---
     let mut tid: u16 = 0;
     let mut matched = false;
     unsafe {
@@ -426,7 +427,7 @@ pub fn wait_and_identify_sliced(
         )?;
     }
 
-    // --- Phase C: attendre retrait (optionnel) ---
+    // --- Phase C: wait for removal (optional) ---
     unsafe {
         let _ = sensor_wait_finger_not_present(ctx.chain, 5000);
     }
@@ -438,6 +439,7 @@ pub fn wait_and_identify_sliced(
     Ok(matched)
 }
 
+// retries wipe then enroll until both succeed
 pub fn enroll_once() -> Result<(), i32>{
     let mut wiped = 0;
     let mut enrolled = 0;

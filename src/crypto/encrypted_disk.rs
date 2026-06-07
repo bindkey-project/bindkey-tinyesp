@@ -9,17 +9,21 @@ use super::disk_meta::*;
 
 use crate::spi_link::spi_master::SpiMaster;
 
+// max sectors encrypted/decrypted in a single batch + its size in bytes
 const MAX_BATCH_BLOCKS: usize = 8;
 const BATCH_BYTES: usize = MAX_BATCH_BLOCKS * SECTOR_SIZE;
 
+// max extra volumes besides the default one
 pub const MAX_EXTRA_VOLUMES: usize = 5;
 
+// define a VolumeSlot with its encryption/decryption info + logical sectors addresses
 pub struct VolumeSlot{
     pub gcm: AesGcm,
     pub lba_start: u32, 
     pub lba_end: u32
 }
 
+// make the disk accessible from anywhere
 static GLOBAL_DISK: AtomicPtr<EncryptedDisk> = AtomicPtr::new(ptr::null_mut());
 
 pub fn set_global_disk(disk: &mut EncryptedDisk){
@@ -38,6 +42,7 @@ pub fn get_global_disk() -> Option<&'static mut EncryptedDisk>{
     }
 }
 
+// this struct ciphers/deciphers sectors and stores the matching metadata on the disk
 pub struct EncryptedDisk{
     default_gcm: AesGcm,
     volumes: [Option<VolumeSlot>; MAX_EXTRA_VOLUMES],
@@ -54,6 +59,7 @@ pub struct EncryptedDisk{
 const NONE_VOL: Option<VolumeSlot> = None;
 
 impl EncryptedDisk{
+    // builds a disk with its default volume key
     pub fn new(key: &[u8]) -> Result<Self, i32>{
         Ok(Self{
             default_gcm: AesGcm::new(key)?,
@@ -67,6 +73,7 @@ impl EncryptedDisk{
         })
     }
 
+    // finds the right volume for a given lba
     fn volume_index_for_lba(&self, lba: u32) -> Option<usize>{
         for i in 0..self.num_volumes{
             if let Some(ref v) = self.volumes[i]{
@@ -78,7 +85,8 @@ impl EncryptedDisk{
         }
         None
     }
-
+    
+    // adds a volume to the list
     pub fn add_volume(&mut self, lba_start: u32, lba_end: u32, key: &[u8]) -> Result<(), i32>{
         if self.num_volumes >= MAX_EXTRA_VOLUMES{
             return Err(ESP_ERR_NO_MEM);
@@ -89,7 +97,8 @@ impl EncryptedDisk{
         Ok(())
     }
     
-    pub fn log_volume_table(&self){                                                                                                                                                                                                          
+    // logs the current volume table for debugging
+    pub fn log_volume_table(&self){                                                                                                                                                                                                      
         log::info!("=== Volume Table ({} volumes) ===", self.num_volumes);
         log::info!("  vol0 [default] → constant key (cross-device)");
         for i in 0..self.num_volumes{                                                                                                                                                                                                        
@@ -100,6 +109,7 @@ impl EncryptedDisk{
         log::info!("================================");
     }     
 
+    // clears all the current volumes
     pub fn clear_volumes(&mut self){
         for i in 0..self.num_volumes{
             self.volumes[i] = None;
@@ -108,11 +118,13 @@ impl EncryptedDisk{
         self.invalidate_meta_cache();
     }
 
+    // drops the cached meta sector so it gets re-read from disk
     pub fn invalidate_meta_cache(&mut self){
         self.cached_meta_lba = None;
         self.cached_meta_dirty = false;
     }
 
+    // translating real capacity to logical capacity
     pub fn capacity_logical(&mut self, spi: &mut SpiMaster) -> Result<(u32, u32), i32>{
         let (bs, bc_phys) = spi.get_capacity()?;
         validate_block_size(bs)?;
@@ -120,11 +132,13 @@ impl EncryptedDisk{
         Ok((bs, bc_log))
     }
 
+    // flushes pending meta then the physical disk
     pub fn flush_all(&mut self, spi: &mut SpiMaster) -> Result<(), i32>{
         self.flush_meta(spi)?;
         spi.flush()
     }
 
+    // read command to the SPI bus with decryption
     pub fn read10(&mut self, spi: &mut SpiMaster, lba_start: u32, nblocks: u32, out: &mut [u8]) -> Result<(), i32>{
         let total = (nblocks as usize) * SECTOR_SIZE;
         if out.len() != total{
@@ -152,12 +166,14 @@ impl EncryptedDisk{
                 continue;
             }
 
+            // reading the ciphertext from the hard drive
             let ct_len = run * SECTOR_SIZE;
             if let Err(e) = spi.read(data_phys, run as u32, SECTOR_SIZE as u32, &mut self.cipher_buf[..ct_len]){
                 log::error!("disk read10: spi.read failed lba_phys={} run={} err={}", data_phys, run, e);
                 return Err(e);
             }
 
+            // decryption and tag verification
             for j in 0..run{
                 let lba_j = lba.wrapping_add(j as u32); 
                 let entry = self.cached_meta.entries[idx + j];
@@ -177,9 +193,7 @@ impl EncryptedDisk{
                     None => &mut self.default_gcm
                 };
                 if let Err(e) = decrypt_sector(gcm, lba_j, entry.counter, ct_sector, &entry.tag, out_sector){
-                    // GCM auth failure (-18): sector is corrupted (meta/data mismatch after failed write).
-                    // Fill zeros instead of hard error to prevent OS from unmounting the entire disk.
-                    //log::error!("disk read10: decrypt failed lba={} counter={} err={}, returning zeros", lba_j, entry.counter, e);
+                    // GCM auth failure: corrupted sector, return zeros so the OS does not unmount the disk
                     log::debug!("disk read10: GCM decrypt failed lba={} counter={} err={}", lba_j, entry.counter, e);
                     out_sector.fill(0);
                 }
@@ -190,6 +204,7 @@ impl EncryptedDisk{
         Ok(())
     }
 
+    // write command to the SPI bus with encryption
     pub fn write10(&mut self, spi: &mut SpiMaster, lba_start: u32, nblocks: u32, data: &[u8]) -> Result<(), i32>{
         let total = (nblocks as usize) * SECTOR_SIZE;
         if data.len() != total{
@@ -211,6 +226,7 @@ impl EncryptedDisk{
 
             let in_chunk = &data[done * SECTOR_SIZE..(done + run) * SECTOR_SIZE];
 
+            // encryption and tagging
             for j in 0..run{
                 let lba_j = lba.wrapping_add(j as u32);
                 let old = self.cached_meta.entries[idx + j];
@@ -220,7 +236,7 @@ impl EncryptedDisk{
                     counter = 1;
                 }
                 if counter == 0{
-                    return Err(ESP_ERR_INVALID_STATE); //overflow u32
+                    return Err(ESP_ERR_INVALID_STATE); // counter u32 overflow
                 }
 
                 let vol_idx = self.volume_index_for_lba(lba_j);
@@ -250,9 +266,7 @@ impl EncryptedDisk{
 
             // then flush meta (counter + tag)
             if let Err(e) = self.flush_meta(spi){
-                // meta flush failed after data written: data is on disk with new ciphertext
-                // but meta still has old counter/tag — next read will fail GCM
-                // invalidate cache so next write re-reads meta from disk
+                // meta flush failed after data write: invalidate cache so next write re-reads meta from disk
                 log::error!("write10: meta flush failed after data write lba={} err={}", lba, e);
                 self.cached_meta_lba = None;
                 self.cached_meta_dirty = false;
@@ -266,6 +280,7 @@ impl EncryptedDisk{
     }
 
 
+    // loads the meta sector for a physical LBA into cache (flushing the previous one first)
     fn load_meta(&mut self, spi: &mut SpiMaster, meta_lba_phys: u32) -> Result<(), i32>{
         if self.cached_meta_lba == Some(meta_lba_phys){
             return Ok(());
@@ -282,6 +297,7 @@ impl EncryptedDisk{
         Ok(())
     }
 
+    // writes the cached meta sector back to disk if it is dirty
     fn flush_meta(&mut self, spi: &mut SpiMaster) -> Result<(), i32>{
         let Some(meta_lba) = self.cached_meta_lba else{
             return Ok(());
@@ -291,7 +307,7 @@ impl EncryptedDisk{
             return Ok(());
         }
 
-        self.cached_meta.seq = self.cached_meta.seq.wrapping_add(1); //seq++ optionnal
+        self.cached_meta.seq = self.cached_meta.seq.wrapping_add(1); // seq++ optional
 
         self.cached_meta.encode(&mut self.meta_buf)?;
         spi.write(meta_lba, 1, SECTOR_SIZE as u32, &self.meta_buf)?;

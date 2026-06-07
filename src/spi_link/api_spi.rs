@@ -4,19 +4,22 @@ use esp_idf_sys::*;
 use super::protocol::{Cmd, MAX_PAYLOAD};
 use super::spi_master::{HDR_LEN, SpiMaster};
 
+// global pointer to the SPI master, set once at boot
 static GLOBAL_SPI: AtomicPtr<SpiMaster> = AtomicPtr::new(ptr::null_mut());
 
-//for stats
+// cumulative SPI stats counters
 static SPI_CMD_COUNT: AtomicU32 = AtomicU32::new(0);
 static SPI_TX_BYTES: AtomicU32 = AtomicU32::new(0);
 static SPI_RX_BYTES: AtomicU32 = AtomicU32::new(0);
 static SPI_TIME_US: AtomicU32 = AtomicU32::new(0);
 const ENABLE_SPI_STATS_LOGS: bool = false;
 
+// publishes the global SPI master pointer
 pub fn set_global_spi(master: &mut SpiMaster){
     GLOBAL_SPI.store(master as *mut _, Ordering::Release);
 }
 
+// borrows the global SPI master if it has been published
 pub fn get_global_spi() -> Option<&'static mut SpiMaster>{
     let p = GLOBAL_SPI.load(Ordering::Acquire);
     if p.is_null(){
@@ -27,6 +30,7 @@ pub fn get_global_spi() -> Option<&'static mut SpiMaster>{
     }
 }
 
+// accumulates per-command stats, logs a summary every 1024 commands
 #[inline]
 fn spi_stats_add(cmd: Cmd, tx_bytes: usize, rx_bytes: usize, dt_us: u64){
     let n = SPI_CMD_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
@@ -43,19 +47,21 @@ fn spi_stats_add(cmd: Cmd, tx_bytes: usize, rx_bytes: usize, dt_us: u64){
 }
 
 impl SpiMaster{
+    // GetStatus: returns (esp_err status, block-device status byte)
     pub fn get_status(&mut self) -> Result<(i32, u8), i32>{
         let t0 = unsafe{esp_timer_get_time() as i64};
         let (resp, _seq) = self.cmd_frame(Cmd::GetStatus, 0, 0, 0, 2000, 1)?;
         let t1 = unsafe{esp_timer_get_time() as i64};
 
         let st = resp.arg0 as i32;
-        //payload[0] = bd_status
+        // payload[0] = bd_status
         let bd_status = self.last_rx_payload()[0];
 
         spi_stats_add(Cmd::GetStatus, HDR_LEN, HDR_LEN + 1, (t1 - t0) as u64);
         Ok((st, bd_status))
     }
 
+    // GetCapacity: returns (block_size, block_count) from the slave
     pub fn get_capacity(&mut self) -> Result<(u32, u32), i32>{
         let t0 = unsafe{esp_timer_get_time() as i64};
         let (resp, _seq) = self.cmd_frame(Cmd::GetCapacity, 0, 0, 0, 2000, 8)?;
@@ -75,6 +81,7 @@ impl SpiMaster{
         Ok((bs, bc))
     }
 
+    // multi-chunk read: splits the transfer into MAX_PAYLOAD chunks, verifies each response
     pub fn read(&mut self, lba_start: u32, nblocks_total: u32, block_size: u32, out: &mut [u8]) -> Result<(), i32>{
         let total_bytes = (nblocks_total as usize) * (block_size as usize);
         if out.len() != total_bytes{
@@ -121,7 +128,7 @@ impl SpiMaster{
         Ok(())
     }
 
-    //write multi-chunks => pipelined data.len() == nblocks_total * block_size
+    // multi-chunk write, pipelined: data.len() == nblocks_total * block_size
     pub fn write(&mut self, lba_start: u32, nblocks_total: u32, block_size: u32, data: &[u8]) -> Result<(), i32>{
         let total_bytes = (nblocks_total as usize) * (block_size as usize);
         if data.len() != total_bytes{
@@ -170,6 +177,7 @@ impl SpiMaster{
         Ok(())
     }
 
+    // Flush: asks the slave to sync its buffers to the physical storage
     pub fn flush(&mut self) -> Result<(), i32>{
         let t0 = unsafe{esp_timer_get_time() as i64};
         let (resp, _seq) = self.cmd_frame(Cmd::Flush, 0, 0, 0, 5000, 0)?;

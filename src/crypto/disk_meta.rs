@@ -16,8 +16,9 @@ use super::disk_layout::{G, SECTOR_SIZE};
 pub const META_MAGIC: [u8; 4] = *b"BKMD";
 pub const META_VERSION: u8 = 1;
 pub const META_HEADER_LEN: usize = 32;
-pub const META_ENTRY_LEN: usize = 4 + TAG_LEN; //counter + tag
+pub const META_ENTRY_LEN: usize = 4 + TAG_LEN; // counter + tag
 
+// crc32 helpers
 #[inline]
 fn crc32_step(mut crc: u32, b: u8) -> u32{
     // ^= XOR
@@ -35,7 +36,7 @@ fn crc32_step(mut crc: u32, b: u8) -> u32{
 }
 
 fn crc32_meta_buf(buf: &[u8]) -> u32{
-    // CRC32 avec [12..16] traité comme zéro (champ CRC exclu du calcul)
+    // CRC32 with [12..16] as 0 field (CRC field excluded from computations)
     let mut crc: u32 = 0xFFFF_FFFF;
     for &b in &buf[..12]{
         crc = crc32_step(crc, b);
@@ -49,6 +50,7 @@ fn crc32_meta_buf(buf: &[u8]) -> u32{
     !crc
 }
 
+// metadata entries for IVs and AADs
 #[derive(Clone, Copy, Debug, Default)]
 pub struct MetaEntry{
     pub counter: u32,
@@ -62,7 +64,7 @@ impl MetaEntry{
     }
 }
 
-
+// metadata sectors to aggregate metadata entries
 #[derive(Clone, Debug)]
 pub struct MetaSector{
     pub seq: u32,
@@ -79,6 +81,7 @@ impl Default for MetaSector{
 }
 
 impl MetaSector{
+    // decode and retrieve tag from metadata
     pub fn decode(buf: &[u8]) -> Result<Self, i32>{
         if buf.len() != SECTOR_SIZE{
             return Err(ESP_ERR_INVALID_SIZE);
@@ -131,6 +134,7 @@ impl MetaSector{
         }
     }
 
+    // encode tag into metadata
     pub fn encode(&self, buf: &mut [u8]) -> Result<(), i32>{
         if buf.len() != SECTOR_SIZE{
             return Err(ESP_ERR_INVALID_SIZE);
@@ -138,16 +142,16 @@ impl MetaSector{
 
         buf.fill(0);
 
-        //Header
+        // header
         buf[0..4].copy_from_slice(&META_MAGIC);
         buf[4] = META_VERSION;
         buf[5] = G as u8;
-        //[6..8] reserved = 0;
+        // [6..8] reserved = 0;
         buf[8..12].copy_from_slice(&self.seq.to_le_bytes());
-        //[12..16] crc32 = 0 (implement later)
+        // [12..16] crc32 = 0 (implement later)
 
 
-        //Entries
+        // entries
         let mut off = META_HEADER_LEN;
         for e in self.entries.iter(){
             buf[off..off + 4].copy_from_slice(&e.counter.to_le_bytes());

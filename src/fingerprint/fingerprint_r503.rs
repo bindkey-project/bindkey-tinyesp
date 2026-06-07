@@ -1,7 +1,5 @@
-// ======================================================================
 // R503 Fingerprint Module Driver
 // UART protocol — datasheet: R503-fingerprint-module-user-manual-V1.2.1
-// ======================================================================
 
 use anyhow::{anyhow, Result};
 use core::ffi::c_void;
@@ -13,31 +11,25 @@ use std::{thread, time::Duration};
 
 use esp_idf_sys as sys;
 
-// ======================================================================
-// Pin definitions temporary
-// ======================================================================
-
-const R503_TX_PIN: i32 = 17;     // ESP TX → R503 RXD (reuses BM-Lite MOSI pin)
-const R503_RX_PIN: i32 = 15;     // R503 TXD → ESP RX (reuses BM-Lite MISO pin)
-const R503_WAKEUP_PIN: i32 = 18; // R503 WAKEUP       (reuses BM-Lite IRQ pin)
+// pin definitions temporary
+const R503_TX_PIN: i32 = 17;                       // ESP TX → R503 RXD 
+const R503_RX_PIN: i32 = 15;                       // R503 TXD → ESP RX 
+const R503_WAKEUP_PIN: i32 = 18;                   // R503 WAKEUP       
 const R503_UART_NUM: sys::uart_port_t = 2;
 const R503_BAUD: i32 = 57_600;
 
 // UART RX buffer size
 const RX_BUF_SIZE: i32 = 1024;
 
-// ======================================================================
 // R503 protocol constants
-// ======================================================================
-
 const HEADER: [u8; 2] = [0xEF, 0x01];
 const DEFAULT_ADDR: [u8; 4] = [0xFF, 0xFF, 0xFF, 0xFF];
 
-// Packet identifiers
+// packet identifiers
 const PID_COMMAND: u8 = 0x01;
 const PID_ACK: u8 = 0x07;
 
-// Instruction codes
+// instruction codes
 const CMD_GEN_IMG: u8 = 0x01;
 const CMD_IMG2TZ: u8 = 0x02;
 const CMD_MATCH: u8 = 0x03;
@@ -57,23 +49,20 @@ const CMD_SOFT_RST: u8 = 0x3D;
 const CMD_VFY_PWD: u8 = 0x13;
 const CMD_READ_SYS_PARA: u8 = 0x0F;
 
-// Confirmation codes
+// confirmation codes
 const CONF_OK: u8 = 0x00;
 const CONF_NO_FINGER: u8 = 0x02;
 
-// Max receive buffer (header + addr + pid + length + data + checksum)
+// max receive buffer (header + addr + pid + length + data + checksum)
 const MAX_PKT_LEN: usize = 256;
 
-// Default read timeout in RTOS ticks (ESP-IDF default: 1 tick = 1ms at 1000Hz)
+// default read timeout in RTOS ticks (ESP-IDF default: 1 tick = 1ms at 1000Hz)
 const READ_TIMEOUT_TICKS: u32 = 1000; // 1s — enough for simple commands
 
 // GenImg needs longer: sensor capture takes 300-500ms with finger present
 const GENIMG_TIMEOUT_TICKS: u32 = 3000; // 3s
 
-// ======================================================================
 // LED control types (public)
-// ======================================================================
-
 #[derive(Clone, Copy, Debug)]
 #[repr(u8)]
 pub enum LedMode {
@@ -97,10 +86,7 @@ pub enum LedColor {
     White  = 0x07,
 }
 
-// ======================================================================
-// Global context
-// ======================================================================
-
+// global context
 struct R503Ctx {
     initialized: bool,
 }
@@ -110,18 +96,17 @@ unsafe impl Sync for R503Ctx {}
 
 impl R503Ctx {
     const fn new() -> Self {
-        Self { initialized: false }
+        Self{ 
+            initialized: false 
+        }
     }
 }
 
-lazy_static! {
+lazy_static!{
     static ref R503_CTX: Mutex<R503Ctx> = Mutex::new(R503Ctx::new());
 }
 
-// ======================================================================
 // Low-level UART I/O
-// ======================================================================
-
 fn uart_tx(data: &[u8]) {
     let ret = unsafe {
         sys::uart_write_bytes(R503_UART_NUM, data.as_ptr() as *const c_void, data.len())
@@ -148,11 +133,11 @@ fn uart_flush_rx() {
     }
 }
 
-/// Aggressively drain any pending RX bytes (power-on 0x55, stale responses).
+/// aggressively drain any pending RX bytes (power-on 0x55, stale responses).
 fn drain_rx() {
     uart_flush_rx();
     let mut junk = [0u8; 64];
-    // Read with very short timeout to consume anything still arriving
+    // read with very short timeout to consume anything still arriving
     loop {
         let n = uart_rx(&mut junk, 5);
         if n <= 0 {
@@ -161,31 +146,29 @@ fn drain_rx() {
     }
 }
 
-// ======================================================================
-// Packet building / parsing
-// ======================================================================
+// packet building / parsing
 
-/// Build a command packet: HEADER(2) + ADDR(4) + PID(1) + LENGTH(2) + DATA(n) + CHECKSUM(2)
-/// `data` contains instruction code + parameters (without PID/LENGTH/CHECKSUM).
-/// Returns the total packet in `out` and the number of bytes written.
+// build a command packet: HEADER(2) + ADDR(4) + PID(1) + LENGTH(2) + DATA(n) + CHECKSUM(2)
+// `data` contains instruction code + parameters (without PID/LENGTH/CHECKSUM).
+// Returns the total packet in `out` and the number of bytes written.
 fn build_packet(data: &[u8], out: &mut [u8; MAX_PKT_LEN]) -> usize {
     let length: u16 = (data.len() + 2) as u16; // data + 2 bytes checksum
 
     let mut i = 0;
-    // Header
+    // header
     out[i] = HEADER[0]; i += 1;
     out[i] = HEADER[1]; i += 1;
-    // Address
+    // address
     out[i..i+4].copy_from_slice(&DEFAULT_ADDR); i += 4;
     // PID
     out[i] = PID_COMMAND; i += 1;
-    // Length (big-endian)
+    // length (big-endian)
     out[i] = (length >> 8) as u8; i += 1;
     out[i] = (length & 0xFF) as u8; i += 1;
-    // Data (instruction code + params)
+    // data (instruction code + params)
     out[i..i+data.len()].copy_from_slice(data); i += data.len();
 
-    // Checksum = PID + LENGTH bytes + DATA bytes
+    // checksum = PID + LENGTH bytes + DATA bytes
     let mut sum: u16 = PID_COMMAND as u16;
     sum = sum.wrapping_add((length >> 8) as u16);
     sum = sum.wrapping_add((length & 0xFF) as u16);
@@ -198,20 +181,20 @@ fn build_packet(data: &[u8], out: &mut [u8; MAX_PKT_LEN]) -> usize {
     i
 }
 
-/// Parsed acknowledge packet
+// parsed acknowledge packet
 struct AckPacket {
     pub confirmation_code: u8,
     pub data: [u8; MAX_PKT_LEN],
     pub data_len: usize, // bytes after confirmation_code (parameters only)
 }
 
-/// Read and parse an ACK packet from the R503.
-/// Scans the byte stream for the 0xEF01 header, discarding any leading
-/// garbage (power-on 0x55, noise from hot reset, stale bytes).
+// read and parse an ACK packet from the R503.
+// scans the byte stream for the 0xEF01 header, discarding any leading
+// garbage (power-on 0x55, noise from hot reset, stale bytes).
 fn read_ack(timeout_ticks: u32) -> Result<AckPacket> {
-    // --- Scan for header 0xEF 0x01 ---
-    // Read byte by byte, looking for the sync sequence.
-    // This handles the R503 power-on 0x55 byte and any UART noise.
+    // --- scan for header 0xEF 0x01 ---
+    // read byte by byte, looking for the sync sequence.
+    // this handles the R503 power-on 0x55 byte and any UART noise.
     let mut prev: u8 = 0;
     let mut found_header = false;
     let max_scan = 64; // don't scan forever
@@ -232,14 +215,14 @@ fn read_ack(timeout_ticks: u32) -> Result<AckPacket> {
         return Err(anyhow!("R503: header 0xEF01 not found (scanned {} bytes)", max_scan));
     }
 
-    // Read address (4 bytes)
+    // read address (4 bytes)
     let mut addr = [0u8; 4];
     let n = uart_rx(&mut addr, timeout_ticks);
     if n < 4 {
         return Err(anyhow!("R503: address timeout"));
     }
 
-    // Read PID (1 byte)
+    // read PID (1 byte)
     let mut pid = [0u8; 1];
     let n = uart_rx(&mut pid, timeout_ticks);
     if n < 1 {
@@ -249,7 +232,7 @@ fn read_ack(timeout_ticks: u32) -> Result<AckPacket> {
         return Err(anyhow!("R503: unexpected PID 0x{:02X} (expected ACK 0x07)", pid[0]));
     }
 
-    // Read length (2 bytes, big-endian)
+    // read length (2 bytes, big-endian)
     let mut len_bytes = [0u8; 2];
     let n = uart_rx(&mut len_bytes, timeout_ticks);
     if n < 2 {
@@ -260,7 +243,7 @@ fn read_ack(timeout_ticks: u32) -> Result<AckPacket> {
         return Err(anyhow!("R503: invalid packet length {}", pkt_len));
     }
 
-    // Read remaining bytes: confirmation_code + params + checksum(2)
+    // read remaining bytes: confirmation_code + params + checksum(2)
     let remaining = pkt_len as usize; // includes confirmation_code + params + checksum(2)
     let mut buf = [0u8; MAX_PKT_LEN];
     let n = uart_rx(&mut buf[..remaining], timeout_ticks);
@@ -268,7 +251,7 @@ fn read_ack(timeout_ticks: u32) -> Result<AckPacket> {
         return Err(anyhow!("R503: data timeout, expected {} got {}", remaining, n));
     }
 
-    // Verify checksum
+    // verify checksum
     let mut sum: u16 = pid[0] as u16;
     sum = sum.wrapping_add(len_bytes[0] as u16);
     sum = sum.wrapping_add(len_bytes[1] as u16);
@@ -295,7 +278,7 @@ fn read_ack(timeout_ticks: u32) -> Result<AckPacket> {
     Ok(ack)
 }
 
-/// Send a command and receive ACK. Returns the AckPacket.
+// send a command and receive ACK. Returns the AckPacket.
 fn send_cmd(data: &[u8], timeout_ticks: u32) -> Result<AckPacket> {
     uart_flush_rx();
     let mut pkt = [0u8; MAX_PKT_LEN];
@@ -304,7 +287,7 @@ fn send_cmd(data: &[u8], timeout_ticks: u32) -> Result<AckPacket> {
     read_ack(timeout_ticks)
 }
 
-/// Send a simple command (instruction code only, no params) and check confirmation=OK.
+// send a simple command (instruction code only, no params) and check confirmation=OK.
 fn send_simple_cmd(cmd: u8) -> Result<AckPacket> {
     send_cmd(&[cmd], READ_TIMEOUT_TICKS)
 }
@@ -354,18 +337,15 @@ fn check_conf(ack: &AckPacket, what: &str) -> Result<()> {
     }
 }
 
-// ======================================================================
 // GPIO helper for WAKEUP pin
-// ======================================================================
-
 fn wakeup_pin_init() -> Result<()> {
     unsafe {
         let err = sys::gpio_set_direction(R503_WAKEUP_PIN, sys::gpio_mode_t_GPIO_MODE_INPUT);
         if err != 0 {
             return Err(anyhow!("R503: gpio_set_direction WAKEUP failed ({})", err));
         }
-        // The R503 WAKEUP outputs high when no finger, low when finger detected.
-        // Enable pull-up to ensure clean high when no finger.
+        // the R503 WAKEUP outputs high when no finger, low when finger detected.
+        // enable pull-up to ensure clean high when no finger.
         let err = sys::gpio_set_pull_mode(R503_WAKEUP_PIN, sys::gpio_pull_mode_t_GPIO_PULLUP_ONLY);
         if err != 0 {
             return Err(anyhow!("R503: gpio_set_pull_mode WAKEUP failed ({})", err));
@@ -374,21 +354,18 @@ fn wakeup_pin_init() -> Result<()> {
     Ok(())
 }
 
-/// Returns true if a finger is currently touching the sensor (WAKEUP=LOW).
+// returns true if a finger is currently touching the sensor (WAKEUP=LOW).
 pub fn is_finger_present() -> bool {
     unsafe { sys::gpio_get_level(R503_WAKEUP_PIN) == 0 }
 }
 
-// ======================================================================
 // LED control
-// ======================================================================
-
-/// Control the R503 Aura LED ring.
-///
-/// * `mode`  — breathing, flashing, always on/off, gradual on/off
-/// * `speed` — 0x00..0xFF (256 gears, min 5s cycle). Relevant for breathing/flashing/gradual.
-/// * `color` — red, blue, purple, green, yellow, cyan, white
-/// * `count` — 0 = infinite, 1..255 = number of cycles (breathing/flashing only)
+// Control the R503 Aura LED ring.
+//
+// * `mode`  — breathing, flashing, always on/off, gradual on/off
+// * `speed` — 0x00..0xFF (256 gears, min 5s cycle). Relevant for breathing/flashing/gradual.
+// * `color` — red, blue, purple, green, yellow, cyan, white
+// * `count` — 0 = infinite, 1..255 = number of cycles (breathing/flashing only)
 pub fn led_control(mode: LedMode, speed: u8, color: LedColor, count: u8) -> Result<()> {
     let ack = send_cmd(
         &[CMD_AURA_LED, mode as u8, speed, color as u8, count],
@@ -397,49 +374,47 @@ pub fn led_control(mode: LedMode, speed: u8, color: LedColor, count: u8) -> Resu
     check_conf(&ack, "AuraLedConfig")
 }
 
-/// Turn LED on with the given color (steady).
+// turn LED on with the given color (steady).
 pub fn led_on(color: LedColor) -> Result<()> {
     led_control(LedMode::AlwaysOn, 0, color, 0)
 }
 
-/// Turn LED off.
+// turn LED off.
 pub fn led_off() -> Result<()> {
     led_control(LedMode::AlwaysOff, 0, LedColor::Blue, 0)
 }
 
-/// Breathing LED effect.
-/// * `speed` — 0x00..0xFF (lower = slower)
-/// * `count` — 0 = infinite, 1..255 = cycles
+// breathing LED effect.
+// * `speed` — 0x00..0xFF (lower = slower)
+// * `count` — 0 = infinite, 1..255 = cycles
 pub fn led_breathing(color: LedColor, speed: u8, count: u8) -> Result<()> {
     led_control(LedMode::Breathing, speed, color, count)
 }
 
-/// Flashing LED effect.
+// flashing LED effect.
 pub fn led_flashing(color: LedColor, speed: u8, count: u8) -> Result<()> {
     led_control(LedMode::Flashing, speed, color, count)
 }
 
-/// Gradually turn LED on.
+// gradually turn LED on.
 pub fn led_gradual_on(color: LedColor, speed: u8) -> Result<()> {
     led_control(LedMode::GradualOn, speed, color, 0)
 }
 
-/// Gradually turn LED off.
+// gradually turn LED off.
 pub fn led_gradual_off(color: LedColor, speed: u8) -> Result<()> {
     led_control(LedMode::GradualOff, speed, color, 0)
 }
 
-// ======================================================================
-// Low-level R503 commands (public for flexibility)
-// ======================================================================
+// low-level R503 commands (public for flexibility)
 
-/// Handshake — verify the module is alive.
+// handshake: verify the module is alive.
 pub fn handshake() -> Result<()> {
     let ack = send_simple_cmd(CMD_HANDSHAKE)?;
     check_conf(&ack, "Handshake")
 }
 
-/// Verify password (default 0x00000000).
+// verify password (default 0x00000000).
 pub fn verify_password(password: u32) -> Result<()> {
     let ack = send_cmd(
         &[
@@ -454,23 +429,23 @@ pub fn verify_password(password: u32) -> Result<()> {
     check_conf(&ack, "VfyPwd")
 }
 
-/// Check if the sensor hardware is OK.
+// check if the sensor hardware is OK.
 pub fn check_sensor() -> Result<()> {
     let ack = send_simple_cmd(CMD_CHECK_SENSOR)?;
     check_conf(&ack, "CheckSensor")
 }
 
-/// Soft reset the module. After reset, module sends 0x55 as handshake sign.
+// soft reset the module. After reset, module sends 0x55 as handshake sign.
 pub fn soft_reset() -> Result<()> {
     let ack = send_simple_cmd(CMD_SOFT_RST)?;
     check_conf(&ack, "SoftRst")?;
-    // Wait for module to restart and send 0x55
+    // wait for module to restart and send 0x55
     thread::sleep(Duration::from_millis(100));
     uart_flush_rx();
     Ok(())
 }
 
-/// Read system parameters (16 bytes). Returns (status_reg, library_size, security_level).
+// read system parameters (16 bytes). Returns (status_reg, library_size, security_level).
 pub fn read_sys_para() -> Result<(u16, u16, u16)> {
     let ack = send_simple_cmd(CMD_READ_SYS_PARA)?;
     check_conf(&ack, "ReadSysPara")?;
@@ -483,7 +458,7 @@ pub fn read_sys_para() -> Result<(u16, u16, u16)> {
     Ok((status, lib_size, sec_level))
 }
 
-/// Get the number of stored templates.
+// get the number of stored templates.
 pub fn template_count() -> Result<u16> {
     let ack = send_simple_cmd(CMD_TEMPLATE_NUM)?;
     check_conf(&ack, "TemplateNum")?;
@@ -494,28 +469,28 @@ pub fn template_count() -> Result<u16> {
     Ok(count)
 }
 
-/// Collect a finger image into ImageBuffer.
-/// Returns CONF_NO_FINGER (0x02) if no finger, or error.
+// collect a finger image into ImageBuffer.
+// returns CONF_NO_FINGER (0x02) if no finger, or error.
 pub fn gen_image() -> Result<u8> {
     let ack = send_cmd(&[CMD_GEN_IMG], GENIMG_TIMEOUT_TICKS)?;
     Ok(ack.confirmation_code)
 }
 
-/// Collect finger image (extended version — returns error on poor quality).
+// collect finger image (extended version — returns error on poor quality).
 pub fn gen_image_ex() -> Result<u8> {
     let ack = send_cmd(&[CMD_GET_IMAGE_EX], GENIMG_TIMEOUT_TICKS)?;
     Ok(ack.confirmation_code)
 }
 
-/// Generate character file from image in ImageBuffer.
-/// `buffer_id`: 1..6 (CharBuffer number).
+// generate character file from image in ImageBuffer.
+// `buffer_id`: 1..6 (CharBuffer number).
 pub fn img_to_tz(buffer_id: u8) -> Result<()> {
     let ack = send_cmd(&[CMD_IMG2TZ, buffer_id], READ_TIMEOUT_TICKS)?;
     check_conf(&ack, "Img2Tz")
 }
 
-/// Match templates in CharBuffer1 and CharBuffer2.
-/// Returns the match score, or error if no match.
+// match templates in CharBuffer1 and CharBuffer2.
+// returns the match score, or error if no match.
 pub fn match_templates() -> Result<u16> {
     let ack = send_simple_cmd(CMD_MATCH)?;
     check_conf(&ack, "Match")?;
@@ -526,10 +501,10 @@ pub fn match_templates() -> Result<u16> {
     Ok(score)
 }
 
-/// Search the finger library for a match against CharBuffer1.
-/// `start_id`: starting template position.
-/// `count`: number of templates to search.
-/// Returns (page_id, match_score) on success.
+// search the finger library for a match against CharBuffer1.
+// `start_id`: starting template position.
+// `count`: number of templates to search.
+// returns (page_id, match_score) on success.
 pub fn search(start_id: u16, count: u16) -> Result<(u16, u16)> {
     let ack = send_cmd(
         &[
@@ -551,15 +526,15 @@ pub fn search(start_id: u16, count: u16) -> Result<(u16, u16)> {
     Ok((page_id, score))
 }
 
-/// Combine CharBuffer1 and CharBuffer2 into a template (stored in both buffers).
+// combine CharBuffer1 and CharBuffer2 into a template (stored in both buffers).
 pub fn reg_model() -> Result<()> {
     let ack = send_simple_cmd(CMD_REG_MODEL)?;
     check_conf(&ack, "RegModel")
 }
 
-/// Store template from CharBuffer to Flash at the given position.
-/// `buffer_id`: 1 or 2 (CharBuffer number).
-/// `model_id`: 0..N library position.
+// store template from CharBuffer to Flash at the given position.
+// `buffer_id`: 1 or 2 (CharBuffer number).
+// `model_id`: 0..N library position.
 pub fn store_template(buffer_id: u8, model_id: u16) -> Result<()> {
     let ack = send_cmd(
         &[
@@ -573,7 +548,7 @@ pub fn store_template(buffer_id: u8, model_id: u16) -> Result<()> {
     check_conf(&ack, "Store")
 }
 
-/// Delete `count` templates starting from `start_id`.
+// delete `count` templates starting from `start_id`.
 pub fn delete_templates(start_id: u16, count: u16) -> Result<()> {
     let ack = send_cmd(
         &[
@@ -588,20 +563,20 @@ pub fn delete_templates(start_id: u16, count: u16) -> Result<()> {
     check_conf(&ack, "DeletChar")
 }
 
-/// Empty the entire finger library.
+// empty the entire finger library.
 pub fn empty_library() -> Result<()> {
     let ack = send_simple_cmd(CMD_EMPTY)?;
     check_conf(&ack, "Empty")
 }
 
-/// AutoEnroll — automatic enrollment (collects 6 images, merges, stores).
-/// `model_id`: library position (0..199, or 0xC8..0xFF for auto-assign).
-/// `allow_overwrite`: allow overwriting existing ID.
-/// `allow_duplicate`: allow duplicate fingerprints.
-/// `return_status`: return progress status at each step.
-/// `require_remove`: require finger removal between captures.
-///
-/// Timeout: up to ~60s for full enrollment (6 captures), so use a long timeout.
+// autoEnroll — automatic enrollment (collects 6 images, merges, stores).
+// `model_id`: library position (0..199, or 0xC8..0xFF for auto-assign).
+// `allow_overwrite`: allow overwriting existing ID.
+// `allow_duplicate`: allow duplicate fingerprints.
+// `return_status`: return progress status at each step.
+// `require_remove`: require finger removal between captures.
+//
+// timeout: up to ~60s for full enrollment (6 captures), so use a long timeout.
 pub fn auto_enroll(
     model_id: u8,
     allow_overwrite: bool,
@@ -609,7 +584,7 @@ pub fn auto_enroll(
     return_status: bool,
     require_remove: bool,
 ) -> Result<()> {
-    // Long timeout for auto_enroll: each capture can take up to 10s,
+    // long timeout for auto_enroll: each capture can take up to 10s,
     // 6 captures → worst case ~90s total.
     let long_timeout: u32 = 1500; // ~15s per intermediate ack
 
@@ -626,14 +601,14 @@ pub fn auto_enroll(
     )?;
 
     if return_status {
-        // When return_status=1, the module sends intermediate ACK packets
+        // when return_status=1, the module sends intermediate ACK packets
         // for each step (collect image, generate feature, etc.) before the final one.
-        // We need to read ACKs until we get the final one (step=0x0F storage, or error).
+        // we need to read ACKs until we get the final one (step=0x0F storage, or error).
         let mut last_code = ack.confirmation_code;
         if last_code != CONF_OK {
-            // First ack might be a step status or an error
-            // Step statuses have confirmation_code=0x00 and parameter1=step
-            // Final errors have non-zero confirmation codes
+            // first ack might be a step status or an error
+            // step statuses have confirmation_code=0x00 and parameter1=step
+            // final errors have non-zero confirmation codes
             if ack.data_len >= 2 {
                 let step = ack.data[0];
                 log::info!("R503 AutoEnroll step=0x{:02X}, id={}", step, ack.data[1]);
@@ -647,7 +622,7 @@ pub fn auto_enroll(
             }
         }
 
-        // Read subsequent intermediate ACKs
+        // read subsequent intermediate ACKs
         loop {
             match read_ack(long_timeout) {
                 Ok(intermediate) => {
@@ -656,7 +631,7 @@ pub fn auto_enroll(
                         let step = intermediate.data[0];
                         let id = intermediate.data[1];
                         log::info!("R503 AutoEnroll step=0x{:02X}, id={}", step, id);
-                        // Step 0x0F = storage template (final step)
+                        // step 0x0F = storage template (final step)
                         if step == 0x0F && last_code == CONF_OK {
                             log::info!("R503 AutoEnroll: storage complete, id={}", id);
                             return Ok(());
@@ -676,20 +651,20 @@ pub fn auto_enroll(
             }
         }
     } else {
-        // No intermediate status — just one final ACK
+        // no intermediate status — just one final ACK
         check_conf(&ack, "AutoEnroll")
     }
 }
 
-/// AutoIdentify — automatic fingerprint verification.
-/// Collects image, generates features, searches library.
-/// Returns (model_id, match_score) on success.
-///
-/// * `security_level`: 1..5
-/// * `start_id`: starting search position
-/// * `count`: number of templates to search
-/// * `return_status`: return progress status
-/// * `max_retries`: 0 = loop forever until match, 1..255 = max attempts
+// autoIdentify — automatic fingerprint verification.
+// collects image, generates features, searches library.
+// returns (model_id, match_score) on success.
+//
+// * `security_level`: 1..5
+// * `start_id`: starting search position
+// * `count`: number of templates to search
+// * `return_status`: return progress status
+// * `max_retries`: 0 = loop forever until match, 1..255 = max attempts
 pub fn auto_identify(
     security_level: u8,
     start_id: u8,
@@ -712,13 +687,13 @@ pub fn auto_identify(
     )?;
 
     if return_status {
-        // Read intermediate ACKs until we get the search result (step=3)
+        // read intermediate ACKs until we get the search result (step=3)
         let mut last_ack = ack;
         loop {
             if last_ack.data_len >= 5 {
                 let step = last_ack.data[0];
                 if step == 3 && last_ack.confirmation_code == CONF_OK {
-                    // Search result
+                    // search result
                     let model_id = ((last_ack.data[1] as u16) << 8) | (last_ack.data[2] as u16);
                     let score = ((last_ack.data[3] as u16) << 8) | (last_ack.data[4] as u16);
                     return Ok((model_id, score));
@@ -734,7 +709,7 @@ pub fn auto_identify(
             last_ack = read_ack(long_timeout)?;
         }
     } else {
-        // Single final ACK: step(1B) + position(2B) + score(2B)
+        // single final ACK: step(1B) + position(2B) + score(2B)
         check_conf(&ack, "AutoIdentify")?;
         if ack.data_len < 5 {
             return Err(anyhow!("R503 AutoIdentify: expected 5+ data bytes, got {}", ack.data_len));
@@ -746,11 +721,10 @@ pub fn auto_identify(
     }
 }
 
-// ======================================================================
-// Public API — mirrors fingerprint.rs (BM-Lite) interface
-// ======================================================================
 
-/// Initialize the R503 module: UART driver, WAKEUP GPIO, handshake.
+// Public API — mirrors fingerprint.rs (BM-Lite) interface
+
+// initialize the R503 module: UART driver, WAKEUP GPIO, handshake.
 pub fn init() -> Result<()> {
     let mut ctx = R503_CTX.lock().unwrap();
     if ctx.initialized {
@@ -795,18 +769,18 @@ pub fn init() -> Result<()> {
         }
     }
 
-    // Configure WAKEUP pin as input
+    // configure WAKEUP pin as input
     wakeup_pin_init()?;
 
-    // Wait for module power-on initialization.
-    // Datasheet says ~50ms, but in practice the module may still be
+    // wait for module power-on initialization.
+    // datasheet says ~50ms, but in practice the module may still be
     // flushing a previous session or sending the 0x55 power-on byte.
     thread::sleep(Duration::from_millis(500));
 
-    // Drain any stale bytes (0x55 power-on byte, leftover from previous session)
+    // drain any stale bytes (0x55 power-on byte, leftover from previous session)
     drain_rx();
 
-    // Handshake with retries — the module may need a few attempts after
+    // handshake with retries — the module may need a few attempts after
     // a hot reset of the ESP32 (R503 stays powered, UART lines glitch).
     let mut hs_ok = false;
     for attempt in 1..=5 {
@@ -827,15 +801,15 @@ pub fn init() -> Result<()> {
     }
     log::info!("R503: handshake OK");
 
-    // Verify default password
+    // verify default password
     verify_password(0x00000000)?;
     log::info!("R503: password verified");
 
-    // Check sensor
+    // check sensor
     check_sensor()?;
     log::info!("R503: sensor OK");
 
-    // Read system parameters
+    // read system parameters
     match read_sys_para() {
         Ok((status, lib_size, sec_level)) => {
             log::info!(
@@ -848,7 +822,7 @@ pub fn init() -> Result<()> {
         Err(e) => log::warn!("R503: ReadSysPara failed: {}", e),
     }
 
-    // Signal success with green LED
+    // signal success with green LED
     let _ = led_on(LedColor::Green);
     thread::sleep(Duration::from_millis(300));
     let _ = led_off();
@@ -858,7 +832,7 @@ pub fn init() -> Result<()> {
     Ok(())
 }
 
-/// Check if at least one fingerprint template is stored.
+// check if at least one fingerprint template is stored.
 pub fn is_user_enrolled() -> Result<bool> {
     let ctx = R503_CTX.lock().unwrap();
     if !ctx.initialized {
@@ -869,7 +843,7 @@ pub fn is_user_enrolled() -> Result<bool> {
     Ok(count > 0)
 }
 
-/// Delete all fingerprint templates from Flash.
+// delete all fingerprint templates from Flash.
 pub fn wipe_templates() -> Result<()> {
     let ctx = R503_CTX.lock().unwrap();
     if !ctx.initialized {
@@ -881,13 +855,13 @@ pub fn wipe_templates() -> Result<()> {
     Ok(())
 }
 
-/// Wait for finger using WAKEUP pin, then capture image with GenImg.
-/// Returns Ok(()) when GenImg succeeds, or Err after timeout.
+// wait for finger using WAKEUP pin, then capture image with GenImg.
+// returns Ok(()) when GenImg succeeds, or Err after timeout.
 fn wait_finger_and_capture(capture_label: &str, timeout_ms: u32) -> Result<()> {
     let start = unsafe { sys::esp_timer_get_time() } as i64;
     let timeout_us = (timeout_ms as i64) * 1000;
 
-    // Phase 1: wait for finger via WAKEUP pin (no UART traffic)
+    // phase 1: wait for finger via WAKEUP pin (no UART traffic)
     loop {
         let now = unsafe { sys::esp_timer_get_time() } as i64;
         if now - start >= timeout_us {
@@ -901,8 +875,8 @@ fn wait_finger_and_capture(capture_label: &str, timeout_ms: u32) -> Result<()> {
 
     log::info!("R503: finger detected (WAKEUP), capturing {}...", capture_label);
 
-    // Phase 2: finger detected — keep retrying GenImg.
-    // Do NOT re-check WAKEUP here: it can fluctuate during image capture.
+    // phase 2: finger detected, keep retrying GenImg.
+    // do NOT re-check WAKEUP here: it can fluctuate during image capture.
     for attempt in 0..10 {
         drain_rx();
         match gen_image() {
@@ -920,14 +894,14 @@ fn wait_finger_and_capture(capture_label: &str, timeout_ms: u32) -> Result<()> {
                 log::warn!("R503: GenImg {} UART error (attempt {}): {}", capture_label, attempt, e);
             }
         }
-        // Wait between retries — don't flood the module
+        // wait between retries, don't flood the module
         thread::sleep(Duration::from_millis(200));
     }
 
     Err(anyhow!("R503: GenImg failed after 10 attempts ({})", capture_label))
 }
 
-/// Wait for finger removal using WAKEUP pin (no GenImg polling).
+// wait for finger removal using WAKEUP pin (no GenImg polling).
 fn wait_finger_removed(timeout_ms: u32) {
     let start = unsafe { sys::esp_timer_get_time() } as i64;
     let timeout_us = (timeout_ms as i64) * 1000;
@@ -943,8 +917,8 @@ fn wait_finger_removed(timeout_ms: u32) {
     }
 }
 
-/// Enroll a new fingerprint using the manual multi-step process.
-/// Captures two images, generates features, merges, and stores at position 0.
+// enroll a new fingerprint using the manual multi-step process.
+// Captures two images, generates features, merges, and stores at position 0.
 pub fn enroll_user() -> Result<()> {
     let ctx = R503_CTX.lock().unwrap();
     if !ctx.initialized {
@@ -952,26 +926,26 @@ pub fn enroll_user() -> Result<()> {
     }
     drop(ctx);
 
-    // Quick handshake to make sure the module is alive before starting
+    // quick handshake to make sure the module is alive before starting
     drain_rx();
     handshake()?;
     log::info!("R503: module alive, starting enrollment");
 
     log::info!("R503: enroll - place your finger...");
     let _ = led_breathing(LedColor::Cyan, 0x80, 0);
-    // Let the LED command complete and drain any stale response
+    // let the LED command complete and drain any stale response
     thread::sleep(Duration::from_millis(100));
     drain_rx();
 
     // --- Capture 1 ---
     wait_finger_and_capture("capture 1", 30_000)?;
 
-    // Generate feature in CharBuffer1
+    // generate feature in CharBuffer1
     img_to_tz(1)?;
     let _ = led_on(LedColor::Yellow);
     log::info!("R503: capture 1 OK, remove finger...");
 
-    // Wait for finger removal using WAKEUP pin
+    // wait for finger removal using WAKEUP pin
     wait_finger_removed(10_000);
 
     let _ = led_breathing(LedColor::Cyan, 0x80, 0);
@@ -983,35 +957,35 @@ pub fn enroll_user() -> Result<()> {
     // --- Capture 2 ---
     wait_finger_and_capture("capture 2", 30_000)?;
 
-    // Generate feature in CharBuffer2
+    // generate feature in CharBuffer2
     img_to_tz(2)?;
     log::info!("R503: capture 2 OK");
 
-    // Merge templates
+    // merge templates
     reg_model()?;
     log::info!("R503: template merged");
 
-    // Store at position 0
+    // store at position 0
     store_template(1, 0)?;
     log::info!("R503: template stored at position 0");
 
-    // Verify
+    // verify
     let count = template_count()?;
     log::info!("R503: templates after enroll: {}", count);
 
-    // Wait for finger removal
+    // wait for finger removal
     wait_finger_removed(5_000);
 
-    // Brief green flash to confirm enrollment, then back to green constant (unlocked)
+    // brief green flash to confirm enrollment, then back to green constant (unlocked)
     let _ = led_flashing(LedColor::Green, 0x40, 3);
     thread::sleep(Duration::from_millis(1000));
     let _ = led_on(LedColor::Green);
     Ok(())
 }
 
-/// Single fingerprint verification attempt.
-/// Waits for a finger (up to `timeout_ms`), then identifies against the library.
-/// Returns true if matched.
+// single fingerprint verification attempt.
+// waits for a finger (up to `timeout_ms`), then identifies against the library.
+// returns true if matched.
 pub fn check_once(timeout_ms: u32) -> Result<bool> {
     let ctx = R503_CTX.lock().unwrap();
     if !ctx.initialized {
@@ -1019,16 +993,16 @@ pub fn check_once(timeout_ms: u32) -> Result<bool> {
     }
     drop(ctx);
 
-    // Wait for finger and capture image
+    // wait for finger and capture image
     match wait_finger_and_capture("check", timeout_ms) {
         Ok(()) => {}
         Err(_) => return Ok(false),
     }
 
-    // Generate feature in CharBuffer1
+    // generate feature in CharBuffer1
     img_to_tz(1)?;
 
-    // Search entire library (200 templates max for R503)
+    // search entire library (200 templates max for R503)
     let matched = match search(0, 200) {
         Ok((page_id, score)) => {
             log::info!("R503: matched template id={}, score={}", page_id, score);
@@ -1037,14 +1011,14 @@ pub fn check_once(timeout_ms: u32) -> Result<bool> {
         Err(_) => false,
     };
 
-    // Wait for finger removal
+    // wait for finger removal
     wait_finger_removed(5_000);
 
     Ok(matched)
 }
 
-/// Require 3 successful fingerprint matches.
-/// LED: blue breathing while waiting, green constant after final success, red on failure.
+// require 3 successful fingerprint matches.
+// LED: blue breathing while waiting, green constant after final success, red on failure.
 pub fn test_fingerprint() -> Result<(), Box<dyn std::error::Error>> {
     for i in 1..=3 {
         log::info!("R503: test {}/3 - place your finger", i);
@@ -1054,10 +1028,10 @@ pub fn test_fingerprint() -> Result<(), Box<dyn std::error::Error>> {
             true => {
                 log::info!("R503: finger recognized ({}/3)", i);
                 if i == 3 {
-                    // Final success — green stays on (unlocked)
+                    // final success, green stays on (unlocked)
                     let _ = led_on(LedColor::Green);
                 } else {
-                    // Intermediate success — brief green flash
+                    // intermediate success, brief green flash
                     let _ = led_on(LedColor::Green);
                     thread::sleep(Duration::from_millis(300));
                     let _ = led_off();
@@ -1076,7 +1050,7 @@ pub fn test_fingerprint() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Complete workflow: init + wipe + enroll + verify 3x.
+// complete workflow: init + wipe + enroll + verify 3x.
 pub fn fingerprint_validation() -> Result<(), Box<dyn std::error::Error>> {
     init()?;
     wipe_templates()?;
@@ -1099,20 +1073,20 @@ pub fn fingerprint_validation() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Single authentication attempt using sliced waiting.
-/// LED: blue breathing while waiting, green on success, red only if wrong finger placed.
+// single authentication attempt using sliced waiting.
+// LED: blue breathing while waiting, green on success, red only if wrong finger placed.
 pub fn test_fingerprint_once() -> Result<(), Box<dyn std::error::Error>> {
     loop {
         log::info!("R503: place your finger");
         let _ = led_breathing(LedColor::Blue, 0x80, 0);
 
-        // Phase 1: wait for finger — Err = timeout (no finger), loop silently, no red
+        // phase 1: wait for finger — Err = timeout (no finger), loop silently, no red
         match wait_finger_and_capture("auth", 10_000) {
             Err(_) => continue,
             Ok(()) => {}
         }
 
-        // Phase 2: finger was placed — identify
+        // phase 2: finger was placed — identify
         if let Err(e) = img_to_tz(1) {
             log::error!("R503: img_to_tz error: {}, retrying...", e);
             continue;
@@ -1137,15 +1111,15 @@ pub fn test_fingerprint_once() -> Result<(), Box<dyn std::error::Error>> {
     }
 }
 
-/// Multi-phase fingerprint identification with sliced waiting.
-///
-/// * `wait_total_ms` — max time to wait for finger presence
-/// * `wait_slice_ms` — polling interval for finger detection
-/// * `identify_ms`   — timeout for the identification phase (unused for R503,
-///                      search is near-instant, kept for API compatibility)
-///
-/// Uses the WAKEUP pin for efficient finger detection, then does
-/// GenImg → Img2Tz → Search.
+// multi-phase fingerprint identification with sliced waiting.
+//
+// * `wait_total_ms` — max time to wait for finger presence
+// * `wait_slice_ms` — polling interval for finger detection
+// * `identify_ms`   — timeout for the identification phase (unused for R503,
+//                      search is near-instant, kept for API compatibility)
+//
+// uses the WAKEUP pin for efficient finger detection, then does
+// GenImg → Img2Tz → Search.
 pub fn wait_and_identify_sliced(
     wait_total_ms: u32,
     wait_slice_ms: u16,
@@ -1161,7 +1135,7 @@ pub fn wait_and_identify_sliced(
     let total_timeout_us = (wait_total_ms as i64) * 1000;
     let slice_us = (wait_slice_ms as i64) * 1000;
 
-    // --- Phase A: wait for finger using WAKEUP pin in sliced intervals ---
+    // --- phase A: wait for finger using WAKEUP pin in sliced intervals ---
     loop {
         let now_us = unsafe { sys::esp_timer_get_time() } as i64;
         if now_us - start_us >= total_timeout_us {
@@ -1169,14 +1143,14 @@ pub fn wait_and_identify_sliced(
         }
 
         if is_finger_present() {
-            // Double-check with GenImg to confirm actual finger contact
+            // double-check with GenImg to confirm actual finger contact
             let code = gen_image()?;
             if code == CONF_OK {
                 break;
             }
         }
 
-        // Sleep for the slice duration, yielding to other tasks
+        // sleep for the slice duration, yielding to other tasks
         let sleep_ms = (slice_us / 1000).min(wait_slice_ms as i64) as u64;
         thread::sleep(Duration::from_millis(sleep_ms));
         unsafe { sys::vTaskDelay(1) };
@@ -1209,9 +1183,9 @@ pub fn wait_and_identify_sliced(
     Ok(matched)
 }
 
-/// Robust enrollment with retries (mirrors BM-Lite enroll_once).
+// robust enrollment with retries (mirrors BM-Lite enroll_once).
 pub fn enroll_once() -> Result<(), i32> {
-    // Wipe with max 5 retries
+    // wipe with max 5 retries
     for attempt in 1..=5 {
         match wipe_templates() {
             Ok(()) => {
@@ -1228,11 +1202,11 @@ pub fn enroll_once() -> Result<(), i32> {
         }
     }
 
-    // Let R503 finish flash erase before starting enrollment
+    // let R503 finish flash erase before starting enrollment
     thread::sleep(Duration::from_millis(300));
     drain_rx();
 
-    // Enroll with max 3 retries
+    // enroll with max 3 retries
     for attempt in 1..=3 {
         match enroll_user() {
             Ok(()) => {

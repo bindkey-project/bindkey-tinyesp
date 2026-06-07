@@ -5,6 +5,7 @@ use super::disk_layout::SECTOR_SIZE;
 
 const IV_CONST: [u8; 4] = [0x42, 0x4B, 0x00, 0x01]; //"BK\0\1"
 
+// building the initialization vector with the counter and the LBA
 #[inline]
 fn make_iv(lba_logical: u32, counter: u32) -> [u8; IV_LEN]{
     let mut iv = [0u8; IV_LEN];
@@ -14,6 +15,7 @@ fn make_iv(lba_logical: u32, counter: u32) -> [u8; IV_LEN]{
     iv
 }
 
+// building the additionnal authenticated data with the counter and the LBA
 #[inline]
 fn make_aad(lba_logical: u32, counter: u32) -> [u8; 8]{
     let mut aad = [0u8; 8];
@@ -22,6 +24,7 @@ fn make_aad(lba_logical: u32, counter: u32) -> [u8; 8]{
     aad
 }
 
+// encryption and computation of tags of the media attached on writes
 #[inline]
 pub fn encrypt_sector(gcm: &mut AesGcm, lba_logical: u32, counter: u32, plaintext: &[u8], ciphertext_out: &mut [u8], tag_out: &mut [u8; TAG_LEN]) -> Result<(), i32>{
     if plaintext.len() != SECTOR_SIZE || ciphertext_out.len() != SECTOR_SIZE{
@@ -38,6 +41,7 @@ pub fn encrypt_sector(gcm: &mut AesGcm, lba_logical: u32, counter: u32, plaintex
     gcm.encrypt_and_tag(&iv, &aad, plaintext, ciphertext_out, tag_out)
 }
 
+// decryption and verification of tags of the media attached on reads
 #[inline]
 pub fn decrypt_sector(gcm: &mut AesGcm, lba_logical: u32, counter: u32, ciphertext: &[u8], tag: &[u8; TAG_LEN], plaintext_out: &mut [u8]) -> Result<(), i32>{
     if ciphertext.len() != SECTOR_SIZE || plaintext_out.len() != SECTOR_SIZE{
