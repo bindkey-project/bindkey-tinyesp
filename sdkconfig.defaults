@@ -1,10 +1,45 @@
 # Rust often needs a bit of an extra main task stack size compared to C (the default is 3K)
-CONFIG_ESP_MAIN_TASK_STACK_SIZE=8000
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=16384
 
 # Use this to set FreeRTOS kernel tick frequency to 1000 Hz (100 Hz by default).
 # This allows to use 1 ms granularity for thread sleeps (10 ms by default).
-#CONFIG_FREERTOS_HZ=1000
+CONFIG_FREERTOS_HZ=1000
 
 # Workaround for https://github.com/espressif/esp-idf/issues/7631
 #CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=n
 #CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_DEFAULT_FULL=n
+
+CONFIG_TINYUSB_ENABLED=y
+CONFIG_TINYUSB_MSC_ENABLED=y
+CONFIG_TINYUSB_TASK_STACK_SIZE=24576
+CONFIG_TINYUSB_MSC_BUFSIZE=8192
+
+# utile pour logs/diag (optionnel)
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+
+#CONFIG_PARTITION_TABLE_CUSTOM=y
+#CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="/home/ouiyam/TP/ESP32/device-tiny/partitions.csv"
+#CONFIG_PARTITION_TABLE_FILENAME="partitions.csv"
+
+# Flash size 
+#CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+
+# Force l’utilisation du driver I2C legacy pour éviter
+# le conflit legacy / driver_ng sous ESP-IDF >= 5.2
+CONFIG_ATCA_I2C_USE_LEGACY_DRIVER=y
+
+# Type de puce : ATECC608A Trust & GO (par défaut du composant)
+CONFIG_ATECC608A_TCUSTOM=y
+CONFIG_ATECC608A_TNG=n
+CONFIG_ATECC608A_TFLEX=n
+
+# Pins I2C utilisées pour l’ATECC608A
+CONFIG_ATCA_I2C_SDA_PIN=4
+CONFIG_ATCA_I2C_SCL_PIN=5
+
+# Adresse I2C (8-bit) pour ATECC608A Trust & GO
+# (valeur attendue par CryptoAuthLib)
+CONFIG_ATCA_I2C_ADDRESS=0xC0
+
+# Fréquence I2C (100 kHz recommandé pour ATECC)
+CONFIG_ATCA_I2C_BAUD_RATE=100000
